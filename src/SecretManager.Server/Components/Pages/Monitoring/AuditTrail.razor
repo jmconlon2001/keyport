@@ -1,0 +1,132 @@
+@page "/audit"
+@attribute [Authorize(Roles = $"{SecretManager.Server.Data.Roles.Admin},{SecretManager.Server.Data.Roles.Auditor}")]
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@inherits AppPageBase
+@inject AuditService Audit
+@inject AuditIntegrityMonitor Integrity
+
+<PageTitle>Audit trail · SecretManager</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>Audit trail</h1>
+        <p class="page-subtitle">Security events: sign-ins, reveals, changes and every secret read by an API client. Hash-chained and tamper-evident.</p>
+    </div>
+    <div class="page-actions">
+        <button class="btn btn-outline-secondary" disabled="@Busy" @onclick="VerifyAsync"><i class="i i-shield"></i> Verify chain</button>
+        <a class="btn btn-outline-secondary" href="@ExportUrl" target="_blank"><i class="i i-download"></i> Export CSV</a>
+    </div>
+</div>
+
+@if (verification is { } v)
+{
+    <div class="alert @(v.Intact ? "alert-success" : "alert-danger") d-flex gap-2 align-items-center">
+        <i class="i @(v.Intact ? "i-check" : "i-alert")"></i>
+        @if (v.Intact)
+        {
+            <span><strong>Chain intact.</strong> @v.Checked.ToString("N0") events verified.</span>
+        }
+        else
+        {
+            <span><strong>Chain broken at event #@v.FirstBrokenId.</strong> Records were altered or deleted outside the application. Investigate immediately.</span>
+        }
+    </div>
+}
+
+<div class="card mb-3">
+    <div class="card-body">
+        <div class="row g-2">
+            <div class="col-md-3"><input class="form-control" placeholder="Actor" @bind="actor" @bind:event="oninput" @bind:after="Search" /></div>
+            <div class="col-md-3"><input class="form-control" placeholder="Action (e.g. secret.reveal)" @bind="action" @bind:event="oninput" @bind:after="Search" /></div>
+            <div class="col-md-2"><input class="form-control" placeholder="Target" @bind="target" @bind:event="oninput" @bind:after="Search" /></div>
+            <div class="col-6 col-md-2">
+                <select class="form-select" @bind="environment" @bind:after="Search">
+                    <option value="">All environments</option>
+                    @foreach (var e in Environments.All) { <option value="@e.Name">@e.Name</option> }
+                </select>
+            </div>
+            <div class="col-6 col-md-2">
+                <select class="form-select" @bind="result" @bind:after="Search">
+                    <option value="">Any result</option>
+                    <option>Success</option><option>Denied</option><option>Failure</option>
+                </select>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card card-flush">
+    <div class="table-wrap">
+        <table class="table table-cards">
+            <thead><tr><th>#</th><th>Time (UTC)</th><th>Actor</th><th>Action</th><th>Env</th><th>Target</th><th>Result</th><th>Source IP</th><th>Details</th></tr></thead>
+            <tbody>
+                @foreach (var a in items)
+                {
+                    <tr>
+                        <td data-label="#" class="cell-mono cell-sub">@a.Id</td>
+                        <td data-label="Time" class="cell-mono">@a.TimestampUtc.ToString("yyyy-MM-dd HH:mm:ss")</td>
+                        <td class="td-primary"><span class="cell-main">@a.Actor</span><span class="d-md-none cell-sub"> · @a.Action</span></td>
+                        <td data-label="Action"><code>@a.Action</code></td>
+                        <td data-label="Env">@(a.Environment ?? "—")</td>
+                        <td data-label="Target" class="cell-mono">@(a.Target ?? "—")</td>
+                        <td data-label="Result"><span class="pill @Home.ResultPill(a.Result)">@a.Result</span></td>
+                        <td data-label="IP" class="cell-mono cell-sub">@(a.ClientIp ?? "—")</td>
+                        <td data-label="Details" class="cell-sub" style="max-width:280px">@a.Details</td>
+                    </tr>
+                }
+                @if (items.Count == 0)
+                {
+                    <tr><td colspan="9"><div class="empty"><i class="i i-file"></i><h3>No matching events</h3></div></td></tr>
+                }
+            </tbody>
+        </table>
+    </div>
+    <Pager Skip="skip" Take="Take" Total="total" OnPage="PageAsync" />
+</div>
+
+<ToastHost Items="Toasts" />
+
+@code {
+    private const int Take = 50;
+    private List<SecretManager.Server.Data.AuditEvent> items = [];
+    private int total, skip;
+    private string? actor, action, target, environment, result;
+    private AuditVerification? verification;
+
+    private string ExportUrl =>
+        $"admin/api/audit/export.csv?actor={Uri.EscapeDataString(actor ?? "")}&action={Uri.EscapeDataString(action ?? "")}&target={Uri.EscapeDataString(target ?? "")}&environment={Uri.EscapeDataString(environment ?? "")}&result={Uri.EscapeDataString(result ?? "")}";
+
+    protected override async Task OnPageInitializedAsync()
+    {
+        verification = Integrity.Last?.Result;
+        await LoadAsync();
+    }
+
+    private async Task Search()
+    {
+        skip = 0;
+        await LoadAsync();
+    }
+
+    private async Task PageAsync(int s)
+    {
+        skip = s;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        (items, total) = await Audit.QueryAsync(new AuditQuery(actor, action, environment, target, result, Skip: skip, Take: Take));
+    }
+
+    private async Task VerifyAsync()
+    {
+        await RunAsync("audit.verify", async () =>
+        {
+            verification = await Integrity.RunAsync();
+            await Audit.WriteAsync(Access.UserName, "audit.verify", verification.Intact ? AuditResult.Success : AuditResult.Failure, clientIp: Ip,
+                details: verification.Intact ? $"{verification.Checked} events" : $"broken at #{verification.FirstBrokenId}");
+        });
+        await LoadAsync();
+    }
+}

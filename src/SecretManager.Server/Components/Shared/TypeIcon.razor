@@ -1,0 +1,13 @@
+<span class="type-icon type-@Type" title="@Type.DisplayName()"><i class="i @Icon(Type)"></i></span>
+
+@code {
+    [Parameter] public SecretType Type { get; set; }
+
+    public static string Icon(SecretType t) => t switch
+    {
+        SecretType.OracleConnection or SecretType.SqlServerConnection => "i-database",
+        SecretType.BasicAuth => "i-globe",
+        SecretType.ServiceAccount => "i-user",
+        _ => "i-key",
+    };
+}

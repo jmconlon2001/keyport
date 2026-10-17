@@ -1,0 +1,123 @@
+﻿@page "/Account/Login"
+@layout SecretManager.Server.Components.Layout.AuthLayout
+
+@using System.ComponentModel.DataAnnotations
+@using Microsoft.AspNetCore.Authentication
+@using Microsoft.AspNetCore.Identity
+@using SecretManager.Server.Data
+@using SecretManager.Server.Services
+
+@inject UserManager<ApplicationUser> UserManager
+@inject SignInManager<ApplicationUser> SignInManager
+@inject ILogger<Login> Logger
+@inject IdentityRedirectManager RedirectManager
+@inject AuditService Audit
+
+<PageTitle>Sign in · SecretManager</PageTitle>
+
+<h1 class="auth-title">Sign in</h1>
+<p class="auth-subtitle">Use your SecretManager account. All sign-ins are audited.</p>
+
+<StatusMessage Message="@errorMessage" />
+<EditForm EditContext="editContext" method="post" OnSubmit="LoginUser" FormName="login">
+    <DataAnnotationsValidator />
+    <div class="form-floating mb-3">
+        <InputText @bind-Value="Input.UserName" id="Input.UserName" class="form-control" autocomplete="username webauthn" aria-required="true" placeholder="username" />
+        <label for="Input.UserName" class="form-label">Username</label>
+        <ValidationMessage For="() => Input.UserName" class="text-danger small" />
+    </div>
+    <div class="form-floating mb-3">
+        <InputText type="password" @bind-Value="Input.Password" id="Input.Password" class="form-control" autocomplete="current-password" aria-required="true" placeholder="password" />
+        <label for="Input.Password" class="form-label">Password</label>
+        <ValidationMessage For="() => Input.Password" class="text-danger small" />
+    </div>
+    <button type="submit" class="w-100 btn btn-lg btn-primary">Sign in</button>
+    <div class="auth-divider"><span>or</span></div>
+    <PasskeySubmit Operation="PasskeyOperation.Request" Name="Input.Passkey" EmailName="Input.UserName" class="w-100 btn btn-lg btn-outline-secondary">
+        <i class="i i-key"></i> Sign in with a passkey
+    </PasskeySubmit>
+</EditForm>
+<p class="auth-footnote">Forgot your password? Ask a SecretManager administrator to reset it.</p>
+
+@code {
+    private string? errorMessage;
+    private EditContext editContext = default!;
+
+    [CascadingParameter]
+    private HttpContext HttpContext { get; set; } = default!;
+
+    [SupplyParameterFromForm]
+    private InputModel Input { get; set; } = default!;
+
+    [SupplyParameterFromQuery]
+    private string? ReturnUrl { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        Input ??= new();
+        editContext = new EditContext(Input);
+
+        if (HttpMethods.IsGet(HttpContext.Request.Method))
+        {
+            await HttpContext.SignOutAsync(IdentityConstants.ExternalScheme);
+        }
+    }
+
+    public async Task LoginUser()
+    {
+        var ip = HttpContext.Connection.RemoteIpAddress?.ToString();
+        if (!string.IsNullOrEmpty(Input.Passkey?.Error))
+        {
+            errorMessage = $"Error: {Input.Passkey.Error}";
+            return;
+        }
+
+        SignInResult result;
+        string attemptedUser;
+        if (!string.IsNullOrEmpty(Input.Passkey?.CredentialJson))
+        {
+            result = await SignInManager.PasskeySignInAsync(Input.Passkey.CredentialJson);
+            attemptedUser = string.IsNullOrEmpty(Input.UserName) ? "(passkey)" : Input.UserName;
+        }
+        else
+        {
+            if (!editContext.Validate()) return;
+            attemptedUser = Input.UserName.Trim();
+            result = await SignInManager.PasswordSignInAsync(attemptedUser, Input.Password, isPersistent: false, lockoutOnFailure: true);
+        }
+
+        if (result.Succeeded)
+        {
+            await Audit.WriteAsync(attemptedUser, "auth.login", AuditResult.Success, clientIp: ip, details: Input.Passkey?.CredentialJson is null ? "password" : "passkey");
+            RedirectManager.RedirectTo(ReturnUrl);
+        }
+        else if (result.RequiresTwoFactor)
+        {
+            await Audit.WriteAsync(attemptedUser, "auth.password", AuditResult.Success, clientIp: ip, details: "second factor required");
+            RedirectManager.RedirectTo("Account/LoginWith2fa", new() { ["returnUrl"] = ReturnUrl });
+        }
+        else if (result.IsLockedOut)
+        {
+            await Audit.WriteAsync(attemptedUser, "auth.login", AuditResult.Denied, clientIp: ip, details: "locked out");
+            Logger.LogWarning("Account {User} locked out", attemptedUser);
+            RedirectManager.RedirectTo("Account/Lockout");
+        }
+        else
+        {
+            await Audit.WriteAsync(attemptedUser, "auth.login", AuditResult.Failure, clientIp: ip, details: "invalid credentials");
+            errorMessage = "Error: Invalid sign-in attempt.";
+        }
+    }
+
+    private sealed class InputModel
+    {
+        [Required]
+        public string UserName { get; set; } = "";
+
+        [Required]
+        [DataType(DataType.Password)]
+        public string Password { get; set; } = "";
+
+        public PasskeyInputModel? Passkey { get; set; }
+    }
+}

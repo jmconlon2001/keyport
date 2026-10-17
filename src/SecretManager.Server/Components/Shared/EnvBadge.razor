@@ -1,0 +1,8 @@
+@if (Env is not null)
+{
+    <span class="env-badge" style="--env:@Env.Color"><span class="env-dot" style="--env:@Env.Color"></span>@Env.Name@if (Env.Protected){<i class="i i-lock" title="Protected environment"></i>}</span>
+}
+
+@code {
+    [Parameter] public EnvironmentInfo? Env { get; set; }
+}

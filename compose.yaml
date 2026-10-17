@@ -1,0 +1,58 @@
+# SecretManager: local / single-host deployment.
+#   Podman:  podman compose up -d --build
+#   Docker:  docker compose up -d --build
+#
+# Before first start, create the master key (keep a secure backup: without it nothing can be decrypted):
+#   mkdir -p secrets && openssl rand -base64 32 > secrets/sm_master_key && chmod 600 secrets/sm_master_key
+
+name: secretmanager
+
+services:
+  secretmanager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: localhost/secretmanager:latest
+    container_name: secretmanager
+    restart: unless-stopped
+    init: true          # proper PID 1 (signal handling, zombie reaping)
+    ports:
+      - "8080:8080"   # HTTP bootstrap: /ca.crt, /health, redirect to UI
+      - "8443:8443"   # Admin UI + admin API
+      - "9443:9443"   # Dev API
+      - "9444:9444"   # Test API
+      - "9445:9445"   # Upgrade API
+      - "9446:9446"   # Prod API
+    environment:
+      # Names/IPs clients use to reach the service; they go into the TLS certificate.
+      SecretManager__Edge__HostNames__0: "localhost"
+      SecretManager__Edge__HostNames__1: "secretmanager"
+      SecretManager__Edge__IpAddresses__0: "127.0.0.1"
+      # Log retention (days, 0 = forever)
+      SecretManager__Logs__ApiLogRetentionDays: "90"
+      SecretManager__Logs__UiLogRetentionDays: "90"
+      SecretManager__Logs__AuditRetentionDays: "0"
+    secrets:
+      - sm_master_key
+    volumes:
+      - sm-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "dotnet", "SecretManager.Server.dll", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+secrets:
+  sm_master_key:
+    file: ./secrets/sm_master_key
+
+volumes:
+  sm-data:

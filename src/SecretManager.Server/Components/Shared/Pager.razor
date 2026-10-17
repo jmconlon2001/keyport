@@ -1,0 +1,16 @@
+<div class="pager">
+    <span>@(Total == 0 ? "No results" : $"{Skip + 1:N0}–{Math.Min(Skip + Take, Total):N0} of {Total:N0}")</span>
+    <div class="d-flex gap-2">
+        <button class="btn btn-sm btn-outline-secondary" disabled="@(Skip == 0)" @onclick="() => Go(Math.Max(0, Skip - Take))"><i class="i i-arrow-left"></i> Prev</button>
+        <button class="btn btn-sm btn-outline-secondary" disabled="@(Skip + Take >= Total)" @onclick="() => Go(Skip + Take)">Next <i class="i i-arrow-right"></i></button>
+    </div>
+</div>
+
+@code {
+    [Parameter] public int Skip { get; set; }
+    [Parameter] public int Take { get; set; } = 50;
+    [Parameter] public int Total { get; set; }
+    [Parameter] public EventCallback<int> OnPage { get; set; }
+
+    private Task Go(int skip) => OnPage.InvokeAsync(skip);
+}

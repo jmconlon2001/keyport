@@ -1,0 +1,10 @@
+<div class="toast-stack" role="status" aria-live="polite">
+    @foreach (var t in Items)
+    {
+        <div class="sm-toast @(t.Error ? "error" : "")"><i class="i @(t.Error ? "i-alert" : "i-check")"></i> @t.Text</div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<ToastMessage> Items { get; set; } = [];
+}

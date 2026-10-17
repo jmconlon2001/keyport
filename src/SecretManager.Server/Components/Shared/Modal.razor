@@ -1,0 +1,27 @@
+@if (Show)
+{
+    <div class="sm-modal-backdrop" @onclick="Close">
+        <div class="sm-modal @(Large ? "sm-modal-lg" : "")" role="dialog" aria-modal="true" aria-label="@Title" @onclick:stopPropagation="true">
+            <div class="sm-modal-header">
+                <h3>@Title</h3>
+                <button type="button" class="icon-btn" @onclick="Close" aria-label="Close"><i class="i i-x"></i></button>
+            </div>
+            <div class="sm-modal-body">@ChildContent</div>
+            @if (Footer is not null)
+            {
+                <div class="sm-modal-footer">@Footer</div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public bool Show { get; set; }
+    [Parameter] public string Title { get; set; } = "";
+    [Parameter] public bool Large { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+    [Parameter] public RenderFragment? Footer { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private Task Close() => OnClose.InvokeAsync();
+}

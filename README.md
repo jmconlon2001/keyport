@@ -97,48 +97,9 @@ A self-contained, containerized service that stores and serves **database connec
 
 ### 2.1 Deployment view
 
-```mermaid
-flowchart LR
-    subgraph Clients
-        A1[Apps in Dev]:::dev
-        A2[Apps in Test]:::test
-        A3[Apps in Upgrade]:::upg
-        A4[Apps in Prod]:::prod
-        U[Administrators / users<br/>browser]
-    end
+![Deployment view](docs/images/diagram-deployment.png)
 
-    subgraph Container["keyport container (non-root, read-only FS)"]
-        direction TB
-        H[":8080 HTTP<br/>bootstrap"]
-        ADM[":8443 HTTPS<br/>Admin UI + admin API"]
-        D[":9443 HTTPS Dev API"]:::dev
-        T[":9444 HTTPS Test API"]:::test
-        G[":9445 HTTPS Upgrade API"]:::upg
-        P[":9446 HTTPS Prod API"]:::prod
-        EDGE{{"Edge pipeline<br/>TLS · port gate · headers ·<br/>rate limit · activity log"}}
-        APP["Application services<br/>Secrets · Clients · Users · Audit · CA"]
-        CA["Internal CA<br/>cert issue / renew / hot-swap"]
-        H & ADM & D & T & G & P --> EDGE --> APP
-        APP --- CA
-    end
-
-    VOL[("/data volume<br/>SQLite · CA keys (encrypted) ·<br/>data-protection keys (encrypted)")]
-    KEK[["/run/secrets/keyport_master_key<br/>(container secret)"]]
-
-    A1 -->|"Bearer key (Dev)"| D
-    A2 --> T
-    A3 --> G
-    A4 --> P
-    U --> ADM
-    U -. "first time: GET /ca.crt" .-> H
-    APP --- VOL
-    KEK -. read at startup .-> APP
-
-    classDef dev fill:#d1fae5,stroke:#10b981,color:#064e3b
-    classDef test fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a
-    classDef upg fill:#fef3c7,stroke:#f59e0b,color:#78350f
-    classDef prod fill:#fee2e2,stroke:#ef4444,color:#7f1d1d
-```
+<sub>Diagram source: [`docs/diagrams/deployment.mmd`](docs/diagrams/deployment.mmd)</sub>
 
 In a typical enterprise network, the per-environment ports are opened only from that environment's network segments (firewall or security groups). This gives **network-level** isolation on top of the **application-level** isolation described in §3. For stronger separation, each environment can bind to a different NIC or IP (`Environments[].BindAddress`).
 
@@ -175,37 +136,9 @@ Keyport.sln
 
 ### 2.3 Request flow: an application reads a connection string
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant App as App (Prod)
-    participant K as Kestrel :9446 (TLS)
-    participant Gate as PortGate
-    participant RL as Rate limiter
-    participant F as ApiKeyFilter
-    participant S as SecretService
-    participant DB as SQLite
-    participant Au as AuditService
-    participant Act as ActivityLogger
+![Request flow: an application reads a connection string](docs/images/diagram-request-flow.png)
 
-    App->>K: GET /api/v1/connections/billing/oracle-main<br/>Authorization: Bearer sm_ab12cd34_…
-    K->>Gate: socket LocalPort = 9446 → listener = Prod
-    Gate-->>Gate: path must be /api/v1/* (UI/admin → 404)
-    Gate->>RL: per-key fixed window (default 300/min)
-    RL->>F: authenticate
-    F->>DB: lookup client by prefix, constant-time hash compare
-    F-->>F: key env == port env? enabled? not expired? source IP in CIDR?
-    alt any check fails
-        F->>Au: api.authenticate · Denied · reason
-        F-->>App: 401 (generic message)
-    end
-    F->>S: resolve(Prod, "billing/oracle-main") if granted
-    S->>DB: current SecretVersion
-    S-->>S: unwrap DEK with KEK, decrypt (AAD = secret|id|env|version)
-    S->>Au: api.read-connection · Success · v3
-    S-->>App: 200 {connectionString, components, version}<br/>Cache-Control: no-store
-    K->>Act: queue activity row (client, env, path, status, latency)
-```
+<sub>Diagram source: [`docs/diagrams/request-flow.mmd`](docs/diagrams/request-flow.mmd)</sub>
 
 ### 2.4 Startup sequence
 
@@ -308,13 +241,9 @@ Starting with the old key afterwards is refused ("encrypted with master key(s) �
 
 ### 4.3 TLS and the internal CA
 
-```mermaid
-flowchart LR
-    R["Root CA<br/>ECDSA P-384 · 10 yrs · pathLen=0<br/>/data/ca/root.crt + root.key.enc (KEK-encrypted)"]
-    S["Server certificate<br/>ECDSA P-256 · 90 days · SAN = HostNames + IpAddresses<br/>/data/ca/server.crt + server.key.enc"]
-    R -- signs --> S
-    S -- "hot-swapped via ServerCertificateSelector" --> L[":8443 :9443 :9444 :9445 :9446"]
-```
+![TLS certificate chain](docs/images/diagram-tls-ca.png)
+
+<sub>Diagram source: [`docs/diagrams/tls-ca.mmd`](docs/diagrams/tls-ca.mmd)</sub>
 
 - **Automatic**: issued on first start; re-issued at startup if the SANs change. A background job checks hourly and **renews at two-thirds of its lifetime** (day 60 of 90). New handshakes use the new certificate immediately; open connections are unaffected and no restart is needed. Admins can force a renewal from the Certificates page.
 - **Trust distribution**: clients trust the root once. It can be downloaded from `http://<host>:8080/ca.crt` (bootstrap) or from the Certificates page. **Verify its SHA-256 fingerprint**, which is printed in the startup log and shown in the UI, before installing.
@@ -432,25 +361,9 @@ Standard ASP.NET Core console logging goes to stdout (`podman logs keyport`). Se
 
 ## 6. Data model and storage
 
-```mermaid
-erDiagram
-    EnvironmentDef ||--o{ Secret : contains
-    Secret ||--|{ SecretVersion : "has versions"
-    EnvironmentDef ||--o{ ApiClient : "issues keys for"
-    ApiClient ||--o{ ApiClientGrant : "may read"
-    AspNetUsers ||--o{ UserEnvironmentRole : "has access to"
-    EnvironmentDef ||--o{ UserEnvironmentRole : ""
+![Data model](docs/images/diagram-data-model.png)
 
-    EnvironmentDef { int Id string Name int Port string Color bool Protected int SortOrder bool Active }
-    Secret { int Id int EnvironmentId string Name "unique per env" string Type string MetadataJson "clear, no credentials" string Tags int CurrentVersion datetime RotateAfterUtc }
-    SecretVersion { int Id int SecretId int Version blob WrappedDek blob Ciphertext string KeyId string CreatedBy string Comment }
-    ApiClient { int Id int EnvironmentId string Name string KeyPrefix "unique" string KeyHash "SHA-256" string AllowedCidrs datetime ExpiresUtc bool Disabled datetime LastUsedUtc }
-    ApiClientGrant { int Id int ApiClientId string Pattern "name | prefix/* | *" }
-    UserEnvironmentRole { int Id string UserId int EnvironmentId string Role "Viewer|Editor" }
-    AuditEvent { long Id "dense" datetime TimestampUtc string Actor string Action string Environment string Target string Result string ClientIp string Details string PrevHash string Hash }
-    ProxyRoute { int Id string Name string PathPrefix string Destinations string Ports string Access bool StripPrefix bool RelaxCsp string LoadBalancing string HealthCheckPath bool Enabled }
-    ActivityLog { long Id datetime TimestampUtc string Source "Api|Ui" string Environment string Actor string Method string Path string Target int StatusCode double DurationMs string ClientIp string Error }
-```
+<sub>Diagram source: [`docs/diagrams/data-model.mmd`](docs/diagrams/data-model.mmd)</sub>
 
 Plus the standard ASP.NET Core Identity tables (schema v3, including passkeys) and `AppSettings` (audit anchor).
 
@@ -778,6 +691,7 @@ ASPNETCORE_ENVIRONMENT=Development dotnet run --project src/Keyport.Server
 dotnet test                                           # 109 tests, about 20 s
 
 dotnet ef migrations add <Name> -p src/Keyport.Server -o Data/Migrations   # after model changes
+docs/diagrams/render.sh                               # re-render README diagrams after editing docs/diagrams/*.mmd
 ```
 
 **CI.** GitHub Actions runs `.github/workflows/ci.yml`. For Azure DevOps (Services or on-prem Server), `azure-pipelines.yml` runs the same two stages: build and test (results published to the run), then build the container image and smoke-test it. Create the pipeline from that file (**Pipelines → New pipeline → Azure Repos Git → Existing YAML file**). It runs on the `Default` agent pool unless you pick another when you run it. Its container stage uses Podman (rootless is fine). The agent needs Podman, bash, curl and openssl, plus either the .NET 10 SDK or internet access so the pipeline can install it (turn off *Install the .NET 10 SDK* if the agent has no internet). It also needs nuget.org and mcr.microsoft.com, or internal mirrors of them. Pull request builds in Azure Repos come from a build validation branch policy on `main`, not from the YAML.

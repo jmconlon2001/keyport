@@ -1,0 +1,5 @@
+flowchart LR
+    R["Root CA<br/>ECDSA P-384 · 10 yrs · pathLen=0<br/>/data/ca/root.crt + root.key.enc (KEK-encrypted)"]
+    S["Server certificate<br/>ECDSA P-256 · 90 days · SAN = HostNames + IpAddresses<br/>/data/ca/server.crt + server.key.enc"]
+    R -- signs --> S
+    S -- "hot-swapped via ServerCertificateSelector" --> L[":8443 :9443 :9444 :9445 :9446"]

@@ -1,0 +1,17 @@
+erDiagram
+    EnvironmentDef ||--o{ Secret : contains
+    Secret ||--|{ SecretVersion : "has versions"
+    EnvironmentDef ||--o{ ApiClient : "issues keys for"
+    ApiClient ||--o{ ApiClientGrant : "may read"
+    AspNetUsers ||--o{ UserEnvironmentRole : "has access to"
+    EnvironmentDef ||--o{ UserEnvironmentRole : ""
+
+    EnvironmentDef { int Id string Name int Port string Color bool Protected int SortOrder bool Active }
+    Secret { int Id int EnvironmentId string Name "unique per env" string Type string MetadataJson "clear, no credentials" string Tags int CurrentVersion datetime RotateAfterUtc }
+    SecretVersion { int Id int SecretId int Version blob WrappedDek blob Ciphertext string KeyId string CreatedBy string Comment }
+    ApiClient { int Id int EnvironmentId string Name string KeyPrefix "unique" string KeyHash "SHA-256" string AllowedCidrs datetime ExpiresUtc bool Disabled datetime LastUsedUtc }
+    ApiClientGrant { int Id int ApiClientId string Pattern "name | prefix/* | *" }
+    UserEnvironmentRole { int Id string UserId int EnvironmentId string Role "Viewer|Editor" }
+    AuditEvent { long Id "dense" datetime TimestampUtc string Actor string Action string Environment string Target string Result string ClientIp string Details string PrevHash string Hash }
+    ProxyRoute { int Id string Name string PathPrefix string Destinations string Ports string Access bool StripPrefix bool RelaxCsp string LoadBalancing string HealthCheckPath bool Enabled }
+    ActivityLog { long Id datetime TimestampUtc string Source "Api|Ui" string Environment string Actor string Method string Path string Target int StatusCode double DurationMs string ClientIp string Error }

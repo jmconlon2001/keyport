@@ -1,0 +1,40 @@
+flowchart LR
+    subgraph Clients
+        A1[Apps in Dev]:::dev
+        A2[Apps in Test]:::test
+        A3[Apps in Upgrade]:::upg
+        A4[Apps in Prod]:::prod
+        U[Administrators / users<br/>browser]
+    end
+
+    subgraph Container["keyport container (non-root, read-only FS)"]
+        direction TB
+        H[":8080 HTTP<br/>bootstrap"]
+        ADM[":8443 HTTPS<br/>Admin UI + admin API"]
+        D[":9443 HTTPS Dev API"]:::dev
+        T[":9444 HTTPS Test API"]:::test
+        G[":9445 HTTPS Upgrade API"]:::upg
+        P[":9446 HTTPS Prod API"]:::prod
+        EDGE{{"Edge pipeline<br/>TLS · port gate · headers ·<br/>rate limit · activity log"}}
+        APP["Application services<br/>Secrets · Clients · Users · Audit · CA"]
+        CA["Internal CA<br/>cert issue / renew / hot-swap"]
+        H & ADM & D & T & G & P --> EDGE --> APP
+        APP --- CA
+    end
+
+    VOL[("/data volume<br/>SQLite · CA keys (encrypted) ·<br/>data-protection keys (encrypted)")]
+    KEK[["/run/secrets/keyport_master_key<br/>(container secret)"]]
+
+    A1 -->|"Bearer key (Dev)"| D
+    A2 --> T
+    A3 --> G
+    A4 --> P
+    U --> ADM
+    U -. "first time: GET /ca.crt" .-> H
+    APP --- VOL
+    KEK -. read at startup .-> APP
+
+    classDef dev fill:#d1fae5,stroke:#10b981,color:#064e3b
+    classDef test fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a
+    classDef upg fill:#fef3c7,stroke:#f59e0b,color:#78350f
+    classDef prod fill:#fee2e2,stroke:#ef4444,color:#7f1d1d

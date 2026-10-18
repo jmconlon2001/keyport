@@ -3,7 +3,7 @@
 #
 # Agent requirements (self-hosted Linux agent):
 #   - .NET 10 SDK, or internet access so the UseDotNet task can install it (see installDotNet below)
-#   - Docker (or Podman with the docker compatibility package), and bash, curl and openssl
+#   - Podman (rootless is fine), and bash, curl and openssl
 #   - access to nuget.org and mcr.microsoft.com, or internal mirrors of them
 #
 # Pull request builds: for Azure Repos the `pr:` section below is ignored. Add a build validation
@@ -84,7 +84,8 @@ stages:
           - checkout: self
             clean: true
 
-          - script: docker build -t $(imageTag) .
+          # --format docker keeps the image's HEALTHCHECK (the default OCI format drops it).
+          - script: podman build --format docker -t $(imageTag) .
             displayName: Build image
 
           # Starts, serves health, refuses to start without a master key.
@@ -93,18 +94,19 @@ stages:
               set -euo pipefail
               key="$(Agent.TempDirectory)/keyport_master_key"
               openssl rand -base64 32 > "$key" && chmod 644 "$key"
-              docker run -d --name $(containerName) -p 127.0.0.1::8080 -v "$key:/run/secrets/keyport_master_key:ro" $(imageTag)
-              port=$(docker port $(containerName) 8080/tcp | head -n1 | sed 's/.*://')
+              # :Z relabels the key file for SELinux hosts (RHEL and similar); it is ignored elsewhere.
+              podman run -d --name $(containerName) -p 127.0.0.1::8080 -v "$key:/run/secrets/keyport_master_key:ro,Z" $(imageTag)
+              port=$(podman port $(containerName) 8080/tcp | head -n1 | sed 's/.*://')
               for i in $(seq 1 30); do curl -sf "http://127.0.0.1:$port/health/live" && break; sleep 2; done
               curl -sf "http://127.0.0.1:$port/health/live"
-              logs=$(docker logs $(containerName) 2>&1)
+              logs=$(podman logs $(containerName) 2>&1)
               grep -q "Bootstrap administrator" <<<"$logs"
-              ! docker run --rm $(imageTag)
+              ! podman run --rm $(imageTag)
             displayName: Smoke test
 
           - bash: |
-              docker rm -f $(containerName) >/dev/null 2>&1 || true
-              docker rmi $(imageTag) >/dev/null 2>&1 || true
+              podman rm -f $(containerName) >/dev/null 2>&1 || true
+              podman rmi $(imageTag) >/dev/null 2>&1 || true
               rm -f "$(Agent.TempDirectory)/keyport_master_key"
             displayName: Clean up
             condition: always()

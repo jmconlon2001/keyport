@@ -233,7 +233,7 @@ Segmentation is enforced in several independent layers, so a single mistake does
 | 5 | **Data scoping** | Lookups are always `WHERE EnvironmentId = <port's env>`. Names are unique per environment, so `billing/sql` in Dev and Prod are different rows with different values. | `SecretService.ResolveAsync` |
 | 6 | **Cryptographic binding** | Each ciphertext's AAD includes the environment ID. Copying a Prod ciphertext into a Dev row (for example by direct DB tampering) fails authentication instead of decrypting. | `SecretVersion.Aad` |
 | 7 | **Human access** | UI users get Viewer or Editor per environment. A Dev Editor cannot list, view or reveal Prod secrets. | `UserAccess`, `SecretService` |
-| 8 | **Promotion without copying credentials** | "Promote" copies name, type, settings and username to the next environment but **never the password**. Prod credentials are always entered separately. | `SecretService.PreparePromotionAsync` |
+| 8 | **Promotion without copying credentials** | "Promote" (**Copy to…**) copies name, type, settings and username to the next environment but **never the password**. Prod credentials are always entered separately. The copy is not saved until they are: the form is marked **Not saved yet**, scrolls to the password field and highlights it, and turns to **Ready to save** once everything required is filled in. | `SecretService.PreparePromotionAsync` |
 
 The integration test `EveryKeyIsRejectedOnEveryOtherEnvironmentPort` tests all 16 key-environment/port combinations against the real server over TLS.
 

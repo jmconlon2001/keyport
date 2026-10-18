@@ -73,6 +73,9 @@ public class ApiClient
     public bool Disabled { get; set; }
     public required string CreatedBy { get; set; }
     public DateTime CreatedUtc { get; set; }
+
+    /// <summary>When the current key was issued (creation or last rotation); the key's age is measured from here.</summary>
+    public DateTime KeyCreatedUtc { get; set; }
     public List<ApiClientGrant> Grants { get; set; } = [];
 }
 
@@ -142,6 +145,63 @@ public class ActivityLog
     public string? ClientIp { get; set; }
     public string? UserAgent { get; set; }
     public string? Error { get; set; }
+}
+
+public enum ProxyAccess
+{
+    /// <summary>Anyone who can reach the port.</summary>
+    Anonymous = 0,
+
+    /// <summary>Any signed-in SecretManager user (MFA enforced).</summary>
+    SignedIn = 1,
+
+    /// <summary>Admins and Auditors.</summary>
+    Auditors = 2,
+
+    /// <summary>Admins only.</summary>
+    Admins = 3,
+}
+
+/// <summary>A reverse-proxy route managed from the UI (in addition to routes from configuration).</summary>
+public class ProxyRoute
+{
+    public int Id { get; set; }
+
+    /// <summary>Unique slug; used for YARP route/cluster ids ("ui-{Name}").</summary>
+    public required string Name { get; set; }
+    public string? Description { get; set; }
+
+    /// <summary>Path prefix, e.g. <c>/grafana</c>. Requests to the prefix and everything below it are forwarded.</summary>
+    public required string PathPrefix { get; set; }
+
+    /// <summary>Upstream base URLs, one per line.</summary>
+    public required string Destinations { get; set; }
+
+    /// <summary>Comma-separated listener ports the route may be served on.</summary>
+    public required string Ports { get; set; }
+
+    public ProxyAccess Access { get; set; } = ProxyAccess.SignedIn;
+    public bool StripPrefix { get; set; } = true;
+
+    /// <summary>Skip SecretManager's strict Content-Security-Policy for this route (needed by many proxied web apps).</summary>
+    public bool RelaxCsp { get; set; }
+
+    public string LoadBalancing { get; set; } = "PowerOfTwoChoices";
+
+    /// <summary>Optional upstream path probed every 30 s (active health check), e.g. <c>/healthz</c>.</summary>
+    public string? HealthCheckPath { get; set; }
+
+    public bool Enabled { get; set; } = true;
+    public required string CreatedBy { get; set; }
+    public DateTime CreatedUtc { get; set; }
+    public required string UpdatedBy { get; set; }
+    public DateTime UpdatedUtc { get; set; }
+
+    public IEnumerable<string> DestinationList =>
+        Destinations.Split(['\n', '\r', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    public IEnumerable<int> PortList =>
+        Ports.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(int.Parse);
 }
 
 /// <summary>Small key/value store for app-level state (e.g. CA material, wrapped with the KEK).</summary>

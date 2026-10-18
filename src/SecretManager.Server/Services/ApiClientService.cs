@@ -21,6 +21,11 @@ public sealed class SaveApiClientRequest
 
 public sealed record ApiClientAuthResult(ApiClient? Client, string? Failure);
 
+public enum GrantKind { All, Folder, Secret }
+
+/// <summary>A grant that can be picked in the UI: every secret, a folder of secrets, or one secret.</summary>
+public sealed record GrantOption(string Pattern, GrantKind Kind, int SecretCount, SecretType? Type = null);
+
 public sealed class ApiClientService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     EnvironmentRegistry environments,
@@ -43,6 +48,7 @@ public sealed class ApiClientService(
         if (name.Length is 0 or > 100) throw new ValidationException("Name is required (max 100 characters).");
 
         await using var db = await dbFactory.CreateDbContextAsync();
+        await RequireExistingAsync(db, env, grants, previouslyGranted: new HashSet<string>());
         if (await db.ApiClients.AnyAsync(c => c.EnvironmentId == env.Id && c.Name == name))
             throw new ValidationException($"A client named '{name}' already exists in {env.Name}.");
 
@@ -58,6 +64,7 @@ public sealed class ApiClientService(
             ExpiresUtc = req.ExpiresUtc,
             CreatedBy = user.UserName,
             CreatedUtc = DateTime.UtcNow,
+            KeyCreatedUtc = DateTime.UtcNow,
             Grants = grants.Select(g => new ApiClientGrant { Pattern = g }).ToList(),
         };
         db.ApiClients.Add(client);
@@ -74,6 +81,8 @@ public sealed class ApiClientService(
         var env = Authorize(user, c.EnvironmentId, req.Reason);
         var grants = ParseGrants(req.Grants);
         ValidateCidrs(req.AllowedCidrs);
+        // Grants the client already had stay valid even if their secrets were deleted since; new ones must exist.
+        await RequireExistingAsync(db, env, grants, previouslyGranted: c.Grants.Select(g => g.Pattern).ToHashSet());
 
         c.Description = req.Description;
         c.AllowedCidrs = NormalizeCidrs(req.AllowedCidrs);
@@ -95,8 +104,16 @@ public sealed class ApiClientService(
         var oldPrefix = c.KeyPrefix;
         c.KeyPrefix = key.Prefix;
         c.KeyHash = key.Hash;
+        c.KeyCreatedUtc = DateTime.UtcNow;
+
+        // A new key for an application whose expiry date has passed would be dead on arrival; clear the
+        // past date (keys don't expire by default). Future expiry dates are kept.
+        var clearedExpiry = c.ExpiresUtc is { } exp && exp <= DateTime.UtcNow;
+        if (clearedExpiry) c.ExpiresUtc = null;
+
         await db.SaveChangesAsync();
-        await audit.WriteAsync(user.UserName, "client.rotate-key", AuditResult.Success, env.Name, c.Name, clientIp, $"{oldPrefix} -> {key.Prefix}{ReasonSuffix(reason)}");
+        await audit.WriteAsync(user.UserName, "client.rotate-key", AuditResult.Success, env.Name, c.Name, clientIp,
+            $"{oldPrefix} -> {key.Prefix}{(clearedExpiry ? "; expired date cleared" : "")}{ReasonSuffix(reason)}");
         return key.Plaintext;
     }
 
@@ -171,6 +188,49 @@ public sealed class ApiClientService(
         if (env.Protected && string.IsNullOrWhiteSpace(reason))
             throw new ValidationException($"{env.Name} is a protected environment: a reason is required.");
         return env;
+    }
+
+    /// <summary>Grant choices for an environment, derived from the secrets that exist there.</summary>
+    public async Task<List<GrantOption>> GrantOptionsAsync(UserAccess user, int environmentId)
+    {
+        if (!user.CanView(environmentId)) throw new UnauthorizedAccessException();
+        await using var db = await dbFactory.CreateDbContextAsync();
+        var secrets = await db.Secrets.AsNoTracking().Where(s => s.EnvironmentId == environmentId)
+            .Select(s => new { s.Name, s.Type }).ToListAsync();
+        return BuildGrantOptions(secrets.Select(s => (s.Name, s.Type)));
+    }
+
+    /// <summary>"*", then every folder (each ancestor path, e.g. billing/* and billing/eu/*), then every secret.</summary>
+    public static List<GrantOption> BuildGrantOptions(IEnumerable<(string Name, SecretType Type)> secrets)
+    {
+        var list = secrets.OrderBy(s => s.Name, StringComparer.Ordinal).ToList();
+        var options = new List<GrantOption>();
+        if (list.Count == 0) return options;
+
+        options.Add(new GrantOption("*", GrantKind.All, list.Count));
+        var folders = list
+            .SelectMany(s =>
+            {
+                var parts = s.Name.Split('/');
+                return Enumerable.Range(1, parts.Length - 1).Select(n => string.Join('/', parts.Take(n)) + "/*");
+            })
+            .Distinct()
+            .Select(f => new GrantOption(f, GrantKind.Folder, list.Count(s => SecretNames.MatchesGrant(s.Name, f))));
+        var secretsOpts = list.Select(s => new GrantOption(s.Name, GrantKind.Secret, 1, s.Type));
+
+        // Tree order: each folder directly followed by its sub-folders and secrets ("billing/" sorts before "billing/x").
+        options.AddRange(folders.Concat(secretsOpts).OrderBy(o => o.Kind == GrantKind.Folder ? o.Pattern[..^1] : o.Pattern, StringComparer.Ordinal));
+        return options;
+    }
+
+    private static async Task RequireExistingAsync(ApplicationDbContext db, EnvironmentInfo env, List<string> grants, IReadOnlySet<string> previouslyGranted)
+    {
+        var names = await db.Secrets.AsNoTracking().Where(s => s.EnvironmentId == env.Id).Select(s => new { s.Name, s.Type }).ToListAsync();
+        var valid = BuildGrantOptions(names.Select(n => (n.Name, n.Type))).Select(o => o.Pattern).ToHashSet();
+        var unknown = grants.Where(g => !valid.Contains(g) && !previouslyGranted.Contains(g)).ToList();
+        if (unknown.Count > 0)
+            throw new ValidationException(
+                $"Grants must refer to existing secrets or folders in {env.Name}; not found: {string.Join(", ", unknown)}.");
     }
 
     private static List<string> ParseGrants(string grants)

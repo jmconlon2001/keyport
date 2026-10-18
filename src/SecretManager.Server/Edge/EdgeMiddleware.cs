@@ -122,7 +122,9 @@ public sealed class SecurityHeadersMiddleware(RequestDelegate next)
                 h.StrictTransportSecurity = "max-age=31536000";
 
             var listener = ctx.Listener();
-            if (listener.Kind == ListenerKind.Admin)
+            // Proxied routes can opt out of the strict CSP (many upstream web apps use inline scripts).
+            var relaxCsp = ctx.GetEndpoint()?.Metadata.GetMetadata<RouteModel>()?.Config.Metadata?.GetValueOrDefault(Services.DbProxyConfigProvider.RelaxCspKey) == "true";
+            if (listener.Kind == ListenerKind.Admin && !relaxCsp)
                 h.ContentSecurityPolicy = Csp;
             if (listener.Kind == ListenerKind.Environment || ctx.Request.Path.StartsWithSegments("/admin/api"))
             {

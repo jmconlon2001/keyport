@@ -324,3 +324,66 @@ public class CertificateAuthorityTests
         Assert.Equal(root.Thumbprint, restored.Thumbprint);
     }
 }
+
+public class GrantOptionTests
+{
+    [Fact]
+    public void BuildsAllFoldersAndSecretsWithCounts()
+    {
+        var opts = SecretManager.Server.Services.ApiClientService.BuildGrantOptions([
+            ("billing/eu/sql", SecretType.SqlServerConnection),
+            ("billing/oracle", SecretType.OracleConnection),
+            ("shared/smtp", SecretType.BasicAuth),
+        ]);
+        var map = opts.ToDictionary(o => o.Pattern, o => o.SecretCount);
+
+        Assert.Equal(3, map["*"]);
+        Assert.Equal(2, map["billing/*"]);
+        Assert.Equal(1, map["billing/eu/*"]);
+        Assert.Equal(1, map["shared/*"]);
+        Assert.Equal(1, map["billing/oracle"]);
+        Assert.DoesNotContain("billing/oracle/*", map.Keys);
+        Assert.Equal("*", opts[0].Pattern);
+    }
+
+    [Fact]
+    public void NoSecretsMeansNoOptions() =>
+        Assert.Empty(SecretManager.Server.Services.ApiClientService.BuildGrantOptions([]));
+}
+
+public class GrantOptionOrderTests
+{
+    [Fact]
+    public void OptionsAreInTreeOrder()
+    {
+        var order = SecretManager.Server.Services.ApiClientService.BuildGrantOptions([
+            ("shared/smtp", SecretType.BasicAuth),
+            ("billing/sql-main", SecretType.SqlServerConnection),
+            ("billing/eu/sql-replica", SecretType.SqlServerConnection),
+            ("standalone", SecretType.Generic),
+        ]).Select(o => o.Pattern).ToList();
+
+        Assert.Equal(["*", "billing/*", "billing/eu/*", "billing/eu/sql-replica", "billing/sql-main", "shared/*", "shared/smtp", "standalone"], order);
+    }
+}
+
+public class KeyAgeTests
+{
+    [Theory]
+    [InlineData(0, "less than a day old")]
+    [InlineData(1, "1 day old")]
+    [InlineData(10, "10 days old")]
+    [InlineData(21, "3 weeks old")]
+    [InlineData(95, "3 months old")]
+    [InlineData(365 + 70, "1 year 2 months old")]
+    [InlineData(730, "2 years old")]
+    public void AgeIsHumanFriendly(int daysAgo, string expected) =>
+        Assert.Equal(expected, SecretManager.Server.Components.Shared.AppPageBase.Age(DateTime.UtcNow.AddDays(-daysAgo).AddMinutes(-1)));
+
+    [Fact]
+    public void KeysOverAYearAreFlagged()
+    {
+        Assert.False(SecretManager.Server.Components.Shared.AppPageBase.IsOldKey(DateTime.UtcNow.AddDays(-300)));
+        Assert.True(SecretManager.Server.Components.Shared.AppPageBase.IsOldKey(DateTime.UtcNow.AddDays(-400)));
+    }
+}

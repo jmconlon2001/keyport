@@ -252,6 +252,9 @@ namespace SecretManager.Server.Data.Migrations
                     b.Property<DateTime?>("ExpiresUtc")
                         .HasColumnType("TEXT");
 
+                    b.Property<DateTime>("KeyCreatedUtc")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("KeyHash")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -468,6 +471,79 @@ namespace SecretManager.Server.Data.Migrations
                         .IsUnique();
 
                     b.ToTable("Environments");
+                });
+
+            modelBuilder.Entity("SecretManager.Server.Data.ProxyRoute", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Access")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Destinations")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("Enabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("HealthCheckPath")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LoadBalancing")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PathPrefix")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Ports")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("RelaxCsp")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("StripPrefix")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("UpdatedBy")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedUtc")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Name")
+                        .IsUnique();
+
+                    b.HasIndex("PathPrefix")
+                        .IsUnique();
+
+                    b.ToTable("ProxyRoutes");
                 });
 
             modelBuilder.Entity("SecretManager.Server.Data.Secret", b =>

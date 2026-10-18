@@ -122,7 +122,8 @@ public static class SecretManagerApp
             .AddRoles<IdentityRole>()
             .AddEntityFrameworkStores<ApplicationDbContext>()
             .AddSignInManager()
-            .AddDefaultTokenProviders();
+            .AddDefaultTokenProviders()
+            .AddClaimsPrincipalFactory<AppClaimsPrincipalFactory>();
 
         builder.Services.Configure<SecurityStampValidatorOptions>(o => o.ValidationInterval = TimeSpan.FromMinutes(1));
         builder.Services.ConfigureApplicationCookie(o =>
@@ -193,6 +194,11 @@ public static class SecretManagerApp
 
         // Optional upstream routes (built-in reverse proxy). Each route must declare Metadata.Ports.
         builder.Services.AddReverseProxy().LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));
+        // Routes managed in the UI: stored in the database (on the /data volume), loaded at startup, applied live on save.
+        builder.Services.AddSingleton<DbProxyConfigProvider>();
+        builder.Services.AddSingleton<Yarp.ReverseProxy.Configuration.IProxyConfigProvider>(sp => sp.GetRequiredService<DbProxyConfigProvider>());
+        builder.Services.AddSingleton<ProxyRouteService>();
+        builder.Services.AddHttpClient("proxy-test", c => c.Timeout = TimeSpan.FromSeconds(5));
 
         var app = builder.Build();
         ConfigurePipeline(app);
@@ -290,6 +296,11 @@ public static class SecretManagerApp
                     $"Secrets in the database were encrypted with master key(s) {string.Join(", ", foreign)}, but the loaded key is {encryptor.KeyId}. Refusing to start.");
 
             await app.Services.GetRequiredService<EnvironmentRegistry>().SyncAsync(db);
+
+            // Restore UI-managed reverse-proxy routes persisted in the database.
+            var proxy = app.Services.GetRequiredService<DbProxyConfigProvider>();
+            proxy.Reload();
+            logger.LogInformation("Loaded {Count} reverse-proxy route(s) from the database", proxy.GetConfig().Routes.Count);
             await SeedAsync(scope.ServiceProvider, options, logger);
         }
 

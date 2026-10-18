@@ -10,6 +10,33 @@ A self-contained, containerized service that stores and serves **database connec
 - Status and health pages and APIs.
 - One container, one volume, one secret (the master key).
 
+<p align="center">
+  <img src="docs/images/02-dashboard-dark.png" alt="SecretManager dashboard" width="900">
+</p>
+
+<p align="center"><em>Shown with the built-in demo data for the fictional company "Nimbus Orbital". Try it yourself with <code>--seed-demo</code> (see <a href="#103-try-it-with-demo-data">10.3</a>).</em></p>
+
+### Tour
+
+| | |
+|---|---|
+| **Add a secret: guided, plain language, nothing to memorise**<br>![New secret](docs/images/06-new-secret.png) | **Every secret: who can read it, what they receive, full history**<br>![Secret detail](docs/images/05-secret-detail.png) |
+| **Give an application access by picking from what exists**<br>![Grant picker](docs/images/09-grant-picker.png) | **Applications, with key age at a glance**<br>![Applications](docs/images/08-applications.png) |
+| **Protected Prod, colour-coded environments**<br>![Prod secrets](docs/images/04-secrets-prod.png) | **Spot gaps before a release**<br>![Compare environments](docs/images/07-compare.png) |
+| **Live status: traffic, errors and latency per environment port**<br>![Status](docs/images/10-status.png) | **Health checks at a glance**<br>![Health](docs/images/11-health.png) |
+| **Every API call and UI action, logged**<br>![Activity log](docs/images/12-activity.png) | **Tamper-evident audit trail with one-click verification**<br>![Audit trail](docs/images/13-audit.png) |
+| **Per-environment access for every person**<br>![Users](docs/images/14-users.png) | **Built-in reverse proxy, managed in the UI**<br>![Reverse proxy](docs/images/15-reverse-proxy.png) |
+| **Automatic TLS from the built-in CA**<br>![Certificates](docs/images/16-certificates.png) | **A help guide written for non-technical users**<br>![Help](docs/images/17-help.png) |
+| **Light theme**<br>![Dashboard light](docs/images/03-dashboard-light.png) | **Sign-in with mandatory MFA or passkeys**<br>![Sign in](docs/images/01-sign-in.png) |
+
+**On your phone too**
+
+<p align="center">
+  <img src="docs/images/18-mobile-dashboard.png" alt="Mobile dashboard" width="240">&nbsp;&nbsp;
+  <img src="docs/images/19-mobile-secrets.png" alt="Mobile secrets" width="240">&nbsp;&nbsp;
+  <img src="docs/images/20-mobile-menu.png" alt="Mobile navigation" width="240">
+</p>
+
 > This document is written for architects and reviewers. It explains what was built, how it works, why it was built that way, and its known limits. Day-to-day client onboarding is in [docs/client-migration.md](docs/client-migration.md).
 
 ---
@@ -43,16 +70,16 @@ A self-contained, containerized service that stores and serves **database connec
 | Encryption at rest | AES-256-GCM envelope encryption: a random data key (DEK) per secret version, wrapped by a 256-bit master key (KEK) |
 | Master key | File supplied as a container secret (`/run/secrets/sm_master_key`); never stored by the app |
 | TLS | Built-in internal CA (ECDSA P-384 root, 10 years). The server certificate (ECDSA P-256, 90 days) auto-renews at two-thirds of its lifetime with zero downtime. An enterprise CA can be imported instead. |
-| Edge / reverse proxy | In-process Kestrel edge: TLS termination, port-to-environment binding, security headers, rate limiting, request limits. Optional YARP upstream routes. |
+| Edge / reverse proxy | In-process Kestrel edge: TLS termination, port-to-environment binding, security headers, rate limiting, request limits. **Reverse-proxy routes managed in the UI** (YARP): applied live, stored in the database, persisted across restarts; plus optional routes from configuration. |
 | Environments | Dev :9443 · Test :9444 · Upgrade :9445 · Prod :9446 (configurable; add or remove environments without code changes) |
 | Human auth | Local accounts (ASP.NET Core Identity). **MFA is mandatory** (TOTP authenticator or passkey/WebAuthn), plus lockout and a forced password change on first sign-in. |
-| Machine auth | API keys `sm_<prefix>_<secret>` (256-bit). Stored as SHA-256. Each key is bound to one environment, with grant patterns, an optional CIDR allow-list and an expiry. |
+| Machine auth | API keys `sm_<prefix>_<secret>` (256-bit). Stored as SHA-256. Each key is bound to one environment, with grants chosen from existing secrets and an optional CIDR allow-list. **Keys never expire by default** (an expiry date is optional). The **key's age** is shown everywhere, and keys over a year old are flagged. |
 | Authorization | Global roles Admin and Auditor; per-environment roles Viewer and Editor. **Protected environments** (Upgrade, Prod) require a reason for every reveal or change. |
 | Audit | Append-only, SHA-256 hash-chained audit trail of every security event. Verified hourly and on demand. |
 | Activity log | Every API request and every UI request or action, with status and latency. Retention is configurable per source. |
 | Health / status | `/health`, `/health/live`, `/health/ready` on every port; `/admin/api/status` and `/api/v1/status`; Status and Health pages in the UI |
 | Container | Distroless (chiseled) Ubuntu image, non-root UID 1654, read-only root filesystem, all capabilities dropped, no shell, built-in health check. Works with Podman and Docker. |
-| Tests | 77 automated tests (unit, plus integration tests that run the real server with real TLS on random ports) plus a scripted headless-browser end-to-end run |
+| Tests | 109 automated tests (unit, plus integration tests that run the real server with real TLS on random ports) plus a scripted headless-browser end-to-end run |
 
 ---
 
@@ -120,7 +147,7 @@ SecretManager.sln
 │   ├── Configuration/                   Strongly-typed options
 │   ├── Edge/                            PortGate · SecurityHeaders · ActivityLogging · KEK XML encryptor
 │   ├── Api/                             SecretsApi (/api/v1) · AdminApi (/admin/api)
-│   ├── Services/                        SecretService · ApiClientService · UserAdminService · AuditService ·
+│   ├── Services/                        SecretService · ApiClientService · UserAdminService · AuditService · ProxyRouteService (+DbProxyConfigProvider) ·
 │   │                                    ActivityLogger (+writer, retention) · CertificateManager (+renewal) ·
 │   │                                    EnvironmentRegistry · AccessService · Health checks · StatusService ·
 │   │                                    ConnectionTester
@@ -129,7 +156,7 @@ SecretManager.sln
 │   └── wwwroot/                         app.css design system, icons (inline SVG), JS helpers
 ├── tests/SecretManager.Tests/           xUnit unit + integration tests
 ├── samples/                             C# client, PowerShell, shell
-├── docs/                                Migration guide, screenshots
+├── docs/                                Migration guide, screenshots (docs/images)
 ├── Dockerfile · compose.yaml
 ```
 
@@ -219,6 +246,7 @@ The integration test `EveryKeyIsRejectedOnEveryOtherEnvironmentPort` tests all 1
 | XSS / clickjacking / CSRF | Strict CSP (`script-src 'self'`, no inline scripts, no third-party origins), `X-Frame-Options: DENY`, `frame-ancestors 'none'`, antiforgery tokens on all forms, SameSite=Strict |
 | Downgrade / MITM | HTTPS only for every authenticated surface; TLS 1.2/1.3 only; HSTS. HTTP :8080 serves only the public CA certificate and health. |
 | Open redirect | The HTTP→HTTPS redirect only targets configured host names, never an arbitrary `Host` header. |
+| Proxy routes abused for SSRF or to expose services | Admin-only, reason required, audited. Ports must be chosen explicitly (404 elsewhere). Link-local and cloud-metadata upstreams are always refused. An optional **configuration-only** allow-list (`Proxy:AllowedUpstreams`) restricts upstream hosts. Paths owned by SecretManager cannot be shadowed. |
 | Shoulder-surfing / over-exposure in the UI | Values are masked by default. Reveal needs a confirmation (and a reason in protected environments), auto-hides after 30 s, and is audited. Copy-to-clipboard is audited. |
 | Insider misuse | Per-environment least privilege. Protected-environment reasons are captured in the audit trail. Auditor role for read-only oversight. Every UI page view and action is in the activity log. |
 | Container escape / lateral movement | Distroless image (no shell or package manager), non-root, read-only root FS, `cap_drop: ALL`, `no-new-privileges` |
@@ -409,6 +437,7 @@ erDiagram
     ApiClientGrant { int Id int ApiClientId string Pattern "name | prefix/* | *" }
     UserEnvironmentRole { int Id string UserId int EnvironmentId string Role "Viewer|Editor" }
     AuditEvent { long Id "dense" datetime TimestampUtc string Actor string Action string Environment string Target string Result string ClientIp string Details string PrevHash string Hash }
+    ProxyRoute { int Id string Name string PathPrefix string Destinations string Ports string Access bool StripPrefix bool RelaxCsp string LoadBalancing string HealthCheckPath bool Enabled }
     ActivityLog { long Id datetime TimestampUtc string Source "Api|Ui" string Environment string Actor string Method string Path string Target int StatusCode double DurationMs string ClientIp string Error }
 ```
 
@@ -490,7 +519,7 @@ curl --cacert secretmanager-ca.crt \
 | 404 | Not found **or not granted**. The two are indistinguishable, so names cannot be probed. Also returned for any non-API path on an environment port. |
 | 429 | Rate limit exceeded (per key) |
 
-**Grant patterns**: `billing/oracle-main` (exact), `billing/*` (everything under `billing/`, any depth), `*` (all secrets in the client's environment).
+**Grant patterns**: `billing/oracle-main` (exact), `billing/*` (everything under `billing/`, any depth), `*` (all secrets in the client's environment). Grants are chosen in the UI from the secrets and folders that **exist** in the environment. The server enforces the same rule, so a grant that matches nothing (a typo or invented name) is refused. Grants a client already has stay valid if their secret is later deleted.
 
 **Admin API** (port 8443, signed-in session, returns 401/403 rather than redirects):
 - `GET /admin/api/status`
@@ -504,33 +533,25 @@ Filters are query parameters: `actor, action, environment, target, result, sourc
 
 ## 8. User interface
 
-The UI is desktop-first and responsive: the sidebar becomes a slide-out drawer and tables become stacked cards on phones. It supports light and dark themes (following the OS, with a manual toggle) and is accessible by keyboard.
-
-| Light dashboard | Create a connection (live masked preview) |
-|---|---|
-| ![Dashboard](docs/images/desktop-dashboard-light.png) | ![New secret](docs/images/desktop-secret-new.png) |
-| **Status** | **Users and per-environment access** |
-| ![Status](docs/images/desktop-status.png) | ![Users](docs/images/desktop-users.png) |
-
-| Sign-in | Mobile: secrets | Mobile: navigation |
-|---|---|---|
-| ![Login](docs/images/desktop-login.png) | ![Mobile secrets](docs/images/mobile-secrets.png) | ![Mobile menu](docs/images/mobile-menu.png) |
+The UI is desktop-first and responsive: the sidebar becomes a slide-out drawer and tables become stacked cards on phones. It supports light and dark themes (following the OS, with a manual toggle) and is accessible by keyboard. It is written in plain language for non-technical users who set up secrets for others. Screenshots are in the [Tour](#tour) at the top of this README.
 
 **Pages**
 
 | Page | Purpose |
 |---|---|
-| Dashboard | Health, counts, 24 h traffic, certificate expiry, environment cards, secrets due for rotation, recent audit events |
-| Connections & credentials | Environment tabs (color-coded, protected ones locked), search, type filter |
-| Secret editor | Type picker; Oracle and SQL Server specific fields; password generator; live masked connection-string preview; audited reveal (30 s auto-hide) and copy; versions with rollback; test connection; promote to the next environment; rotation reminder date; delete |
+| Dashboard | A **Getting started** checklist (add a secret, give an application access, hand over the key) until the first secret and application exist; health, counts, 24 h traffic, certificate expiry, environment cards, passwords due for a change, recent audit events |
+| Secrets | Environment tabs (color-coded, protected ones locked), search, filter by kind |
+| Secret editor | Guided, numbered steps in plain language: kind of secret (with descriptions), optional folder plus a free-text name converted to a safe name automatically (with a "saved as" preview and duplicate check), field help with examples, rarely-needed driver settings under *Advanced settings*, a live "Still needed: …" checklist with Save disabled until complete, password generator, test connection, masked preview of what the application receives. Saved secrets show a **"Next step: give an application access"** prompt, the list of applications that can read the secret, audited *Show* (30 s auto-hide) and copy, version history with restore, *Copy to…* another environment, password-change reminder, delete. |
 | Compare environments | Matrix of secret names by Dev/Test/Upgrade/Prod with version numbers, to find gaps before a release (no values) |
-| API clients | Create (key shown once), edit grants, CIDRs and expiry, rotate key, disable or enable, delete; per-environment curl example |
+| Applications (API clients) | Each row shows the key prefix, expiry (**never** by default) and **key age** ("4 months old · issued 18 Jun 2026"; keys over a year old are highlighted with "consider issuing a new key"). Add an application and choose **which secrets it can read from a picker of what exists** (everything, a folder, or individual secrets, shown as a tree with counts and "already covered" hints). This can be started straight from a secret with that secret pre-selected. After creation a **hand-over** panel shows the key once, plus copy-ready setup instructions for the developer (address, the exact requests to make, CA download) that do not contain the key. Edit access, issue a new key, turn off or on, delete. Network restriction is under *Advanced*. |
+| Help & guide | Step-by-step "setting up a secret for someone", common tasks (password changed, copy to Prod, app stopped working, key lost), a glossary in plain words, and good habits |
 | Status | Listeners, traffic, latency percentiles, jobs, retention, TLS |
 | Health | Live health checks with details (auto refresh) |
 | Activity log | API and UI request logs with filters and CSV export |
 | Audit trail | Security events, chain verification, CSV export |
 | Users & access | Create users (temporary password), global roles, Viewer/Editor per environment, reset password, reset MFA, unlock, disable, delete |
 | Certificates | CA and server certificate details, fingerprints, CA download, install instructions, force renewal |
+| Reverse proxy | Admin-only. Create, edit, enable/disable and delete proxy routes (path prefix, upstreams, load balancing, ports, access level, strip prefix, CSP opt-out, health probe); test upstream reachability; live destination health and 24 h request counts; read-only list of routes from configuration |
 | My account | Profile, password, authenticator, recovery codes, passkeys |
 
 ---
@@ -564,20 +585,56 @@ Configuration comes from `appsettings.json` and can be overridden by environment
 | `SecretManager:Environments[i]:Color` | green/blue/amber/red | UI accent |
 | `SecretManager:Environments[i]:Protected` | Upgrade, Prod = `true` | Require reasons and show a warning banner |
 | `SecretManager:Environments[i]:BindAddress` | – | Bind this environment to a specific interface |
-| `ReverseProxy:Routes / Clusters` | empty | Optional YARP upstream routes (below) |
+| `SecretManager:Proxy:AllowedUpstreams[]` | empty | Optional allow-list for UI-managed proxy upstreams (§9.1) |
+| `ReverseProxy:Routes / Clusters` | empty | Optional proxy routes defined in configuration (§9.1) |
 
 The order of `Environments` is the **promotion order** (Dev → Test → Upgrade → Prod).
 
 **Adding an environment** (e.g. `UAT` on 9447): add it to `Environments` in the desired position, publish the port in `compose.yaml`, and restart. Removing an environment from configuration deactivates it: its port is closed and its data is kept but not served.
 
-**Optional upstream routes (built-in reverse proxy)**: YARP can forward selected paths to other internal services behind the same TLS, headers and logging. Each route must name the ports it may be served on through `Metadata.Ports`; otherwise the port gate returns 404:
+### 9.1 Reverse proxy
+
+SecretManager can publish internal services through its own TLS edge, using YARP (Microsoft's reverse proxy). Proxied requests get the same certificate, security headers, port gate and activity logging as everything else.
+
+**Managing routes in the UI (Administration → Reverse proxy, Admin only)**
+
+| Field | Meaning |
+|---|---|
+| Name | Unique slug (`grafana`) |
+| Path prefix | `/grafana`: requests to `/grafana` and everything below it are forwarded. Top-level paths used by SecretManager (`/api`, `/admin`, `/Account`, `/secrets`, `/health`, `/_blazor`, …) are refused. |
+| Upstream URL(s) | One per line. Several upstreams are load-balanced (PowerOfTwoChoices, RoundRobin, LeastRequests, Random, FirstAlphabetical). |
+| Serve on ports | Admin port and/or environment ports. The route returns **404 on every port not selected**. |
+| Who can use it | Signed-in users (MFA) · Admins & Auditors · Admins only · Anyone who can reach the port |
+| Strip prefix | The upstream sees `/` rather than `/grafana/` |
+| Relax CSP | Omit the strict Content-Security-Policy for this route only (many proxied web apps need inline scripts); all other security headers stay |
+| Health check path | Optional active probe every 30 s; the destination's health is shown on the page |
+| Reason | Required. Every create, update, enable/disable, delete and upstream test goes to the audit trail (`proxy.*`). |
+
+**How it works**
+- **Persistence:** routes are stored in the `ProxyRoutes` table of the SQLite database on the `/data` volume.
+- **Live updates:** a custom YARP config provider (`DbProxyConfigProvider`) loads them **at every startup** ("Loaded N reverse-proxy route(s) from the database" in the log) and swaps the live configuration **immediately when you save**, with no restart. YARP validates each route before it is saved, so an invalid configuration never goes live.
+- **Verified persistence:**
+  - The integration test `RoutesPersistAcrossRestart` restarts the server on the same data directory and checks that routes, ports, the CSP setting and disabled state are all restored.
+  - It was also checked on the container: a route created in the UI kept serving after `podman restart` and after deleting and re-creating the container on the same volume.
+
+**Upstream allow-list (optional, configuration only)**:
+
+```json
+"SecretManager": { "Proxy": { "AllowedUpstreams": [ "*.corp.local", "grafana.internal", "10.20.0.0/16" ] } }
+```
+
+Entries can be an exact host, a `*.domain` wildcard, or a CIDR (matched against IP-literal upstreams). If the list is empty, any upstream is allowed except link-local and cloud-metadata addresses (169.254.0.0/16, fe80::/10, `metadata.google.internal`), which are always refused. The list can't be changed from the UI, so a compromised admin session cannot widen it.
+
+**Routes from configuration (infrastructure as code)** still work and appear read-only in the UI. Each must name its ports in `Metadata.Ports`:
 
 ```json
 "ReverseProxy": {
-  "Routes": { "docs": { "ClusterId": "docs", "Match": { "Path": "/docs/{**rest}" }, "Metadata": { "Ports": "8443" } } },
+  "Routes": { "docs": { "ClusterId": "docs", "Match": { "Path": "/docs/{**rest}" }, "AuthorizationPolicy": "default", "Metadata": { "Ports": "8443" } } },
   "Clusters": { "docs": { "Destinations": { "d1": { "Address": "http://docs-internal:8080/" } } } }
 }
 ```
+
+**Putting SecretManager behind your own proxy** (F5, nginx, an application gateway) is a different setup. Use **TCP/TLS passthrough per port**: the environment is decided by the port the connection arrives on, and `X-Forwarded-*` headers are deliberately ignored.
 
 ---
 
@@ -617,16 +674,38 @@ openssl x509 -in secretmanager-ca.crt -noout -fingerprint -sha256
 6. Grant Viewer/Editor per environment, and Auditor to your security team.
 7. Configure log retention to meet your policy, and schedule an export of the audit trail to your SIEM.
 
-### 10.3 Backup and restore
+### 10.3 Try it with demo data
+
+Start an **empty** instance with `--seed-demo` to load data for the fictional company "Nimbus Orbital" and see the product working straight away:
+
+```bash
+podman run -d --name sm-demo --init -p 8443:8443 -p 8080:8080 -p 9443-9446:9443-9446 \
+  -v sm-demo-data:/data -v ./secrets/sm_master_key:/run/secrets/sm_master_key:ro \
+  localhost/secretmanager:latest --seed-demo
+podman logs sm-demo 2>&1 | grep -A6 "DEMO data loaded"     # demo users and their shared password
+```
+
+It loads:
+- **6 users** with different roles (Ava Sterling, Admin; Priya Raman, Auditor; Editors and Viewers per environment)
+- **45 secrets** across Dev, Test, Upgrade and Prod, all of them Oracle and SQL Server databases, website/API logins, service accounts and tokens, including deliberate gaps between environments, several versions and overdue password reminders
+- **28 applications**, including keys well over a year old, one network-restricted, one expiring and one turned off
+- **4 reverse-proxy routes**
+- a realistic audit trail
+
+It then runs the server and makes about 400 live API calls so the dashboard, Status and Activity pages have real numbers.
+
+**Safety:** `--seed-demo` refuses to run if the instance already contains any secret, so it can never mix demo data into a real installation. API keys are only held in memory while the traffic is generated; nothing is written to disk. All names, hosts (`*.nimbus.internal`) and people are fictional.
+
+### 10.4 Backup and restore
 
 - **Back up** the `/data` volume (stop the container, or use `sqlite3 .backup` from a sidecar) **and, separately**, the master key.
 - **Restore**: put the volume back and supply the **same** master key. At startup the service checks every stored KeyId against the loaded key and refuses to start on a mismatch.
 
-### 10.4 Upgrades
+### 10.5 Upgrades
 
 Build or pull the new image and run `podman compose up -d`. EF Core migrations run automatically at startup, and the data on the volume is kept. Downgrades are not supported once a newer migration has been applied; restore from backup instead.
 
-### 10.5 Operational runbook
+### 10.6 Operational runbook
 
 | Situation | Action |
 |---|---|
@@ -639,7 +718,7 @@ Build or pull the new image and run `podman compose up -d`. EF Core migrations r
 | User lost MFA device | Users & access → Reset MFA (they re-enrol at next sign-in) |
 | API key leaked | API clients → Rotate (the old key dies instantly). Review the activity log for its prefix. |
 
-### 10.6 Capacity
+### 10.7 Capacity
 
 This is a single instance. SQLite in WAL mode with in-process caching comfortably handles thousands of API reads per minute. Clients should cache values for a few minutes (the C# sample does). See §14 for high availability.
 
@@ -664,7 +743,7 @@ openssl rand -base64 32 > .localdata/master.key       # dev key (gitignored)
 ASPNETCORE_ENVIRONMENT=Development dotnet run --project src/SecretManager.Server
 # → https://localhost:8443  (dev data in ./.localdata)
 
-dotnet test                                           # 77 tests, about 10 s
+dotnet test                                           # 109 tests, about 20 s
 
 dotnet ef migrations add <Name> -p src/SecretManager.Server -o Data/Migrations   # after model changes
 ```
@@ -678,6 +757,7 @@ dotnet ef migrations add <Name> -p src/SecretManager.Server -o Data/Migrations  
 | Connection strings | SQL Server and Oracle escaping of hostile passwords, Integrated Security, EZConnect vs TNS/SID, extra options, masked preview never leaks |
 | Audit chain | intact chain, edited row detected, deleted row detected, field-boundary shift detected |
 | CA | chain to root, SANs, server-auth EKU, leaf never outlives issuer, two-thirds renewal threshold, PEM/PKCS#8 round trip |
+| **Reverse proxy (real upstream)** | served only on selected ports; prefix stripping; sign-in required for protected routes; live update, disable/enable and delete; CSP opt-out; reserved paths, link-local/metadata, allow-list, scheme and credential validation; Admin-only with reason; upstream test; **routes persist across a server restart** |
 | **Integration (real Kestrel + TLS + all listeners)** | read on own port; **4×4 environment/port matrix**; ungranted equals missing; list shows granted names only; disabled, expired and CIDR keys; key rotation; UI/admin routes 404 on env ports; `/api/v1` 404 on the admin port; HTTP bootstrap behavior; health on all ports; client status; **activity log captures 200/404/401**; rate limit 429; protected-environment reasons; promotion never copies the password; versions and rollback; environment-scoped users; validation; ciphertext row binding; audit tamper detection; retention purge with chain anchor; startup refusal with the wrong or missing master key; duplicate ports; admin API 401; security headers and no inline scripts; open-redirect guard |
 
 **End-to-end verification performed on the container** (Podman 5.8, arm64):

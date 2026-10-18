@@ -9,15 +9,15 @@
         {
             <div class="env-banner" style="--env:@Env.Color"><i class="i i-lock"></i> @Env.Name is protected. A reason is required and will be recorded in the audit trail.</div>
         }
-        @if (AskReason || Env is { Protected: true })
+        @if (AskReason || ReasonRequired)
         {
-            <label class="form-label" for="confirm-reason">Reason @(Env is { Protected: true } ? "" : "(optional)")</label>
+            <label class="form-label" for="confirm-reason">Reason @(ReasonRequired ? "" : "(optional)")</label>
             <input id="confirm-reason" class="form-control" @bind="reason" @bind:event="oninput" placeholder="e.g. CHG-1234 rotate after DBA password reset" maxlength="300" />
         }
     </ChildContent>
     <Footer>
         <button type="button" class="btn btn-outline-secondary" @onclick="Cancel">Cancel</button>
-        <button type="button" class="btn @(Danger ? "btn-danger" : "btn-primary")" disabled="@(Env is { Protected: true } && string.IsNullOrWhiteSpace(reason))" @onclick="Confirm">@ConfirmText</button>
+        <button type="button" class="btn @(Danger ? "btn-danger" : "btn-primary")" disabled="@(ReasonRequired && string.IsNullOrWhiteSpace(reason))" @onclick="Confirm">@ConfirmText</button>
     </Footer>
 </Modal>
 
@@ -29,6 +29,11 @@
     [Parameter] public bool Danger { get; set; }
     [Parameter] public bool AskReason { get; set; }
     [Parameter] public EnvironmentInfo? Env { get; set; }
+
+    /// <summary>Force a non-empty reason even outside protected environments.</summary>
+    [Parameter] public bool RequireReason { get; set; }
+
+    private bool ReasonRequired => RequireReason || Env is { Protected: true };
     [Parameter] public EventCallback<string?> OnConfirm { get; set; }
     [Parameter] public EventCallback OnCancel { get; set; }
 

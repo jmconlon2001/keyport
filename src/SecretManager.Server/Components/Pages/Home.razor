@@ -10,7 +10,7 @@
 
 <div class="page-header">
     <div>
-        <h1>Welcome back, @Access.UserName</h1>
+        <h1>Welcome back, @firstName</h1>
         <p class="page-subtitle">Connection strings and credentials across every environment.</p>
     </div>
     <div class="page-actions">
@@ -76,6 +76,22 @@ else
         </div>
     </div>
 
+    @if (firstEditable is not null && (totalSecrets == 0 || totalClients == 0))
+    {
+        <div class="card mb-4 getting-started">
+            <div class="card-header"><h3><i class="i i-zap"></i> Getting started</h3><a class="btn btn-sm btn-ghost" href="help">Read the guide <i class="i i-arrow-right"></i></a></div>
+            <div class="card-body">
+                <ol>
+                    <li class="@(totalSecrets > 0 ? "done" : "")"><div><strong>Add a secret</strong>: a database login, website password or other private value.
+                        @if (totalSecrets == 0){<div class="mt-2"><a class="btn btn-sm btn-primary" href="@($"secrets/{firstEditable.Name.ToLowerInvariant()}/new")"><i class="i i-plus"></i> Add a secret to @firstEditable.Name</a></div>}</div></li>
+                    <li class="@(totalClients > 0 ? "done" : "")"><div><strong>Give an application access</strong>: choose which secrets it may read and get its key.
+                        @if (totalSecrets > 0 && totalClients == 0){<div class="mt-2"><a class="btn btn-sm btn-primary" href="@($"clients/{firstEditable.Name.ToLowerInvariant()}")"><i class="i i-plug"></i> Add an application</a></div>}</div></li>
+                    <li><div><strong>Hand over the key</strong> privately to the application's owner, along with the setup instructions.</div></li>
+                </ol>
+            </div>
+        </div>
+    }
+
     <h2 class="h5 mb-3">Environments</h2>
     <div class="row g-3 mb-4">
         @foreach (var env in visibleEnvs)
@@ -87,7 +103,7 @@ else
                         <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap">
                             <div>
                                 <div class="env-name"><span class="env-dot" style="--env:@env.Color"></span>@env.Name</div>
-                                <div class="env-port">https://…:@env.Port/api/v1</div>
+                                <div class="env-port">@(env.Protected ? "Protected · reason required" : "Applications use port " + env.Port)</div>
                             </div>
                             @if (env.Protected)
                             {
@@ -95,13 +111,13 @@ else
                             }
                             else
                             {
-                                <span class="pill pill-muted">@(Access.CanEdit(env.Id) ? "Editor" : "Viewer")</span>
+                                <span class="pill pill-muted">@(Access.CanEdit(env.Id) ? "You can edit" : "View only")</span>
                             }
                         </div>
                         <div class="env-metrics">
                             <div><strong>@(l?.Secrets ?? 0)</strong><span>Secrets</span></div>
-                            <div><strong>@(l?.Clients ?? 0)</strong><span>Clients</span></div>
-                            <div><strong>@((l?.Last24h?.Requests ?? 0).ToString("N0"))</strong><span>Req 24h</span></div>
+                            <div><strong>@(l?.Clients ?? 0)</strong><span>Apps</span></div>
+                            <div title="API reads in the last 24 hours"><strong>@((l?.Last24h?.Requests ?? 0).ToString("N0"))</strong><span>Reads</span></div>
                         </div>
                     </div>
                 </a>
@@ -120,7 +136,7 @@ else
         {
             <div class="col-xl-6">
                 <div class="card h-100">
-                    <div class="card-header"><h3><i class="i i-clock"></i> Rotation due</h3><span class="pill pill-warning">@rotationDue.Count</span></div>
+                    <div class="card-header"><h3><i class="i i-clock"></i> Passwords due for a change</h3><span class="pill pill-warning">@rotationDue.Count</span></div>
                     <div class="card-flush">
                         <table class="table table-hover table-clickable">
                             <tbody>
@@ -169,12 +185,20 @@ else
     private EnvironmentInfo? firstEditable;
     private List<SecretManager.Server.Data.AuditEvent> recentAudit = [];
     private List<SecretSummary> rotationDue = [];
+    private int totalSecrets, totalClients;
+    private string firstName = "";
+
+    [CascadingParameter] private Task<AuthenticationState>? AuthState { get; set; }
 
     protected override async Task OnPageInitializedAsync()
     {
+        if (AuthState is not null) firstName = (await AuthState).User.FirstName();
+        if (string.IsNullOrEmpty(firstName)) firstName = Access.UserName;
         visibleEnvs = Environments.All.Where(e => Access.CanView(e.Id)).ToList();
         firstEditable = visibleEnvs.FirstOrDefault(e => Access.CanEdit(e.Id));
         status = await StatusService.GetAsync();
+        totalSecrets = visibleEnvs.Sum(e => Listener(e)?.Secrets ?? 0);
+        totalClients = visibleEnvs.Sum(e => Listener(e)?.Clients ?? 0);
         if (Access.CanReadAudit)
             recentAudit = (await Audit.QueryAsync(new AuditQuery(Take: 8))).Items;
         foreach (var env in visibleEnvs)

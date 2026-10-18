@@ -15,6 +15,7 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
     public DbSet<AuditEvent> AuditEvents => Set<AuditEvent>();
     public DbSet<AppSetting> AppSettings => Set<AppSetting>();
     public DbSet<ActivityLog> ActivityLogs => Set<ActivityLog>();
+    public DbSet<ProxyRoute> ProxyRoutes => Set<ProxyRoute>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -62,6 +63,17 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
         });
 
         b.Entity<AppSetting>(e => e.HasKey(x => x.Key));
+
+        b.Entity<ProxyRoute>(e =>
+        {
+            e.HasIndex(x => x.Name).IsUnique();
+            e.HasIndex(x => x.PathPrefix).IsUnique();
+            e.Property(x => x.Name).HasMaxLength(50);
+            e.Property(x => x.PathPrefix).HasMaxLength(100);
+            e.Property(x => x.Access).HasConversion<string>().HasMaxLength(20);
+            e.Ignore(x => x.DestinationList);
+            e.Ignore(x => x.PortList);
+        });
 
         b.Entity<ActivityLog>(e =>
         {

@@ -13,7 +13,7 @@ namespace SecretManager.Server;
 public static class Cli
 {
     public static bool IsCommand(string[] args) =>
-        args.Contains("--healthcheck") || args.Contains("--generate-master-key") || args.Contains("--rotate-kek") || args.Contains("--help");
+        args.Contains("--healthcheck") || args.Contains("--generate-master-key") || args.Contains("--rotate-kek") || args.Contains("--help") || args.Contains("--seed-demo");
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -24,11 +24,15 @@ public static class Cli
                   (no options)                 run the server
                   --healthcheck                exit 0 if the local server is live (for container HEALTHCHECK)
                   --generate-master-key        print a new random 256-bit master key (base64)
+                  --seed-demo                  EMPTY instance only: load fictional demo data, then run the server
                   --rotate-kek <newKeyFile>    re-wrap all data under a new master key, then exit.
                                                Stop the server first; afterwards point SM_MASTER_KEY_FILE at the new key.
                 """);
             return 0;
         }
+
+        if (args.Contains("--seed-demo"))
+            return await DemoSeeder.RunAsync(args);
 
         if (args.Contains("--generate-master-key"))
         {

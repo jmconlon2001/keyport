@@ -83,6 +83,24 @@ public abstract class AppPageBase : ComponentBase
         }));
     }
 
+    /// <summary>Human-friendly age, e.g. "today", "12 days", "3 months", "1 year 2 months".</summary>
+    public static string Age(DateTime utc)
+    {
+        var from = DateTime.SpecifyKind(utc, DateTimeKind.Utc);
+        var days = (int)(DateTime.UtcNow - from).TotalDays;
+        if (days < 1) return "less than a day old";
+        if (days < 14) return $"{days} day{(days == 1 ? "" : "s")} old";
+        if (days < 60) return $"{days / 7} weeks old";
+        var months = days / 30;
+        if (months < 12) return $"{months} months old";
+        var years = days / 365;
+        var rest = (days - years * 365) / 30;
+        return $"{years} year{(years == 1 ? "" : "s")}{(rest > 0 ? $" {rest} month{(rest == 1 ? "" : "s")}" : "")} old";
+    }
+
+    /// <summary>Keys older than a year are flagged (informational only: keys don't expire unless a date is set).</summary>
+    public static bool IsOldKey(DateTime utc) => DateTime.UtcNow - DateTime.SpecifyKind(utc, DateTimeKind.Utc) > TimeSpan.FromDays(365);
+
     protected static string Ago(DateTime? utc)
     {
         if (utc is null) return "never";

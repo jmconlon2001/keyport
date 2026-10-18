@@ -12,7 +12,7 @@ public sealed record SecretResponse(string Name, string Environment, SecretType 
 public sealed record SecretListResponse(string Environment, IReadOnlyList<string> Names);
 public sealed record ClientStatusResponse(
     string Environment, int Port, string Service, string Version, string Health, DateTime ServerTimeUtc,
-    string Client, DateTime? KeyExpiresUtc, IReadOnlyList<string> Grants);
+    string Client, DateTime KeyIssuedUtc, DateTime? KeyExpiresUtc, IReadOnlyList<string> Grants);
 public sealed record ApiError(string Error);
 
 /// <summary>
@@ -86,7 +86,7 @@ public static class SecretsApi
         var env = ctx.Listener().Environment!;
         var report = await health.CheckHealthAsync(r => r.Tags.Contains("ready"), ctx.RequestAborted);
         return Results.Ok(new ClientStatusResponse(env.Name, env.Port, "SecretManager", StatusService.Version, report.Status.ToString(),
-            DateTime.UtcNow, client.Name, client.ExpiresUtc, client.Grants.Select(g => g.Pattern).ToList()));
+            DateTime.UtcNow, client.Name, DateTime.SpecifyKind(client.KeyCreatedUtc, DateTimeKind.Utc), client.ExpiresUtc, client.Grants.Select(g => g.Pattern).ToList()));
     }
 
     private static async Task<(ResolvedSecret? Secret, IResult? Error)> ResolveAsync(

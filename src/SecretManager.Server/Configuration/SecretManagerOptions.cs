@@ -13,6 +13,7 @@ public sealed class SecretManagerOptions
     public EdgeOptions Edge { get; set; } = new();
     public CaOptions Ca { get; set; } = new();
     public LogOptions Logs { get; set; } = new();
+    public ProxyOptions Proxy { get; set; } = new();
 
     /// <summary>Environments in promotion order. Each gets its own listener port.</summary>
     public List<EnvironmentOptions> Environments { get; set; } = [];
@@ -51,6 +52,17 @@ public sealed class CaOptions
     /// <summary>Optional: PFX of an existing enterprise (intermediate) CA to issue from instead of a generated root.</summary>
     public string? ImportPfxPath { get; set; }
     public string? ImportPfxPasswordFile { get; set; }
+}
+
+public sealed class ProxyOptions
+{
+    /// <summary>
+    /// Optional allow-list for upstreams of UI-managed proxy routes. Entries: exact host name
+    /// (<c>grafana.corp.local</c>), wildcard (<c>*.corp.local</c>), or CIDR (<c>10.20.0.0/16</c>, matched against
+    /// IP-literal hosts). Empty = any upstream (link-local / cloud-metadata addresses are always refused).
+    /// Deliberately configuration-only: the UI cannot widen it.
+    /// </summary>
+    public List<string> AllowedUpstreams { get; set; } = [];
 }
 
 public sealed class LogOptions

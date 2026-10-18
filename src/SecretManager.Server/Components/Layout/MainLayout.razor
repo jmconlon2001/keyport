@@ -22,7 +22,7 @@
             </button>
             <AuthorizeView>
                 <Authorized>
-                    <a class="avatar" href="Account/Manage" title="@context.User.Identity?.Name">@Initials(context.User.Identity?.Name)</a>
+                    <a class="avatar" href="Account/Manage" title="@context.User.DisplayName()">@Initials(context.User.DisplayName())</a>
                 </Authorized>
             </AuthorizeView>
         </header>

@@ -11,7 +11,7 @@
 <div class="page-header">
     <div>
         <h1>Users &amp; access</h1>
-        <p class="page-subtitle">Local accounts with mandatory MFA. Grant Viewer (read and reveal) or Editor (change) per environment.</p>
+        <p class="page-subtitle">Who can sign in, and what they can do in each environment. Everyone must set up two-step sign-in (an authenticator app or passkey).</p>
     </div>
     <div class="page-actions"><button class="btn btn-primary" @onclick="NewUser"><i class="i i-plus"></i> New user</button></div>
 </div>
@@ -114,6 +114,7 @@
                 {
                     <div class="col-12">
                         <div class="form-section-title mt-2">Environment access</div>
+                        <p class="form-hint mt-1"><strong>Viewer</strong> can see secrets and show passwords. <strong>Editor</strong> can also add and change secrets and applications. <strong>None</strong> hides the environment completely.</p>
                         <div class="vstack gap-2">
                             @foreach (var e in Environments.All)
                             {

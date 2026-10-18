@@ -14,6 +14,13 @@ window.sm = {
             document.body.removeChild(ta);
             return ok;
         }
+    },
+    // Scroll an element into view and put the cursor in it (used to point at the next field to fill in).
+    focus: function (id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); }
     }
 };
 

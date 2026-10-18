@@ -43,7 +43,7 @@
                     <dt>A password was changed on the database</dt>
                     <dd>Open the secret, turn on <em>Change login details</em>, enter the new password and save. Applications receive the new one within a few minutes. The old version is kept in <em>History</em> in case you need to go back.</dd>
                     <dt>The same database exists in Test and Prod</dt>
-                    <dd>Create it in one environment, then use <em>Copy to…</em> on the secret. Settings are copied but the password is not, so enter the Prod password yourself.</dd>
+                    <dd>Create it in one environment, then use <em>Copy to…</em> on the secret. Settings are copied but the password is not, so enter the Prod password yourself and press <strong>Save secret</strong>. The copy isn't created until you do; the page shows <strong>Not saved yet</strong> and takes you to the password box.</dd>
                     <dt>An application stopped working</dt>
                     <dd>Check that its key hasn't expired or been turned off (Applications page), that it uses the right environment address, and that it was given access to the secret. Your administrator can look in the Activity log for the exact reason.</dd>
                     <dt>A key was lost or shared by mistake</dt>

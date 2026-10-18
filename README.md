@@ -246,7 +246,7 @@ The integration test `EveryKeyIsRejectedOnEveryOtherEnvironmentPort` tests all 1
 | Threat | Mitigation |
 |---|---|
 | Theft of the data volume or a database backup | All secret values are AES-256-GCM encrypted under per-version DEKs wrapped by the KEK, which is **not** on the volume. CA private keys and ASP.NET data-protection keys (which protect auth cookies) are also KEK-encrypted. |
-| Database tampering (swap or replay ciphertexts) | AEAD with AAD `secret|{id}|{env}|{version}`. Moved, replayed or altered ciphertexts fail to decrypt. Tested in `CiphertextIsBoundToItsRow`. |
+| Database tampering (swap or replay ciphertexts) | AEAD with AAD `secret\|{id}\|{env}\|{version}`. Moved, replayed or altered ciphertexts fail to decrypt. Tested in `CiphertextIsBoundToItsRow`. |
 | Editing or deleting audit records | SHA-256 hash chain with dense IDs; any edit or gap breaks verification. Verified hourly (health check) and on demand. See §5.1 for limits. |
 | Cross-environment access by an app | §3 layers 1–6 |
 | Stolen API key | Scoped to one environment and to explicit grant patterns. Optional source-CIDR allow-list and expiry. Instant rotation or disable. Every use is logged with source IP. Rate limited. |

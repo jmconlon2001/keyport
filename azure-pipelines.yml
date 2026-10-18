@@ -1,0 +1,110 @@
+# Azure Pipelines (Azure DevOps Services or Azure DevOps Server on-prem).
+# Mirrors .github/workflows/ci.yml: build and test, then build the container image and smoke-test it.
+#
+# Agent requirements (self-hosted Linux agent):
+#   - .NET 10 SDK, or internet access so the UseDotNet task can install it (see installDotNet below)
+#   - Docker (or Podman with the docker compatibility package), and bash, curl and openssl
+#   - access to nuget.org and mcr.microsoft.com, or internal mirrors of them
+#
+# Pull request builds: for Azure Repos the `pr:` section below is ignored. Add a build validation
+# branch policy on main (Repos > Branches > main > Branch policies) that runs this pipeline instead.
+
+trigger:
+  branches:
+    include: [main]
+
+pr:
+  branches:
+    include: [main]
+
+parameters:
+  - name: poolName
+    displayName: Agent pool
+    type: string
+    default: Default
+  - name: installDotNet
+    displayName: Install the .NET 10 SDK on the agent (turn off if the agent already has it or has no internet)
+    type: boolean
+    default: true
+
+variables:
+  buildConfiguration: Release
+  imageTag: keyport:ci-$(Build.BuildId)
+  containerName: keyport-ci-$(Build.BuildId)
+
+stages:
+  - stage: Test
+    displayName: Build and test
+    jobs:
+      - job: test
+        displayName: Build and test
+        pool:
+          name: ${{ parameters.poolName }}
+        steps:
+          - checkout: self
+            clean: true
+
+          - ${{ if parameters.installDotNet }}:
+            - task: UseDotNet@2
+              displayName: Install .NET 10 SDK
+              inputs:
+                packageType: sdk
+                version: 10.0.x
+
+          - script: dotnet tool restore
+            displayName: Restore local tools
+
+          - script: dotnet build Keyport.sln -c $(buildConfiguration)
+            displayName: Build
+
+          - script: >
+              dotnet test Keyport.sln -c $(buildConfiguration) --no-build
+              --logger "console;verbosity=normal" --logger trx
+              --results-directory "$(Agent.TempDirectory)/TestResults"
+            displayName: Test
+
+          - task: PublishTestResults@2
+            displayName: Publish test results
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: VSTest
+              testResultsFiles: '**/*.trx'
+              searchFolder: $(Agent.TempDirectory)/TestResults
+              failTaskOnMissingResultsFile: false
+
+  - stage: Container
+    displayName: Container image
+    dependsOn: Test
+    jobs:
+      - job: container
+        displayName: Build and smoke-test image
+        pool:
+          name: ${{ parameters.poolName }}
+        steps:
+          - checkout: self
+            clean: true
+
+          - script: docker build -t $(imageTag) .
+            displayName: Build image
+
+          # Starts, serves health, refuses to start without a master key.
+          # Uses a random host port and a per-build container name so it is safe on a shared agent.
+          - bash: |
+              set -euo pipefail
+              key="$(Agent.TempDirectory)/keyport_master_key"
+              openssl rand -base64 32 > "$key" && chmod 644 "$key"
+              docker run -d --name $(containerName) -p 127.0.0.1::8080 -v "$key:/run/secrets/keyport_master_key:ro" $(imageTag)
+              port=$(docker port $(containerName) 8080/tcp | head -n1 | sed 's/.*://')
+              for i in $(seq 1 30); do curl -sf "http://127.0.0.1:$port/health/live" && break; sleep 2; done
+              curl -sf "http://127.0.0.1:$port/health/live"
+              logs=$(docker logs $(containerName) 2>&1)
+              grep -q "Bootstrap administrator" <<<"$logs"
+              ! docker run --rm $(imageTag)
+            displayName: Smoke test
+
+          - bash: |
+              docker rm -f $(containerName) >/dev/null 2>&1 || true
+              docker rmi $(imageTag) >/dev/null 2>&1 || true
+              rm -f "$(Agent.TempDirectory)/keyport_master_key"
+            displayName: Clean up
+            condition: always()

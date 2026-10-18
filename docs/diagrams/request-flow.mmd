@@ -1,0 +1,29 @@
+sequenceDiagram
+    autonumber
+    participant App as App (Prod)
+    participant K as Kestrel :9446 (TLS)
+    participant Gate as PortGate
+    participant RL as Rate limiter
+    participant F as ApiKeyFilter
+    participant S as SecretService
+    participant DB as SQLite
+    participant Au as AuditService
+    participant Act as ActivityLogger
+
+    App->>K: GET /api/v1/connections/billing/oracle-main<br/>Authorization: Bearer sm_ab12cd34_…
+    K->>Gate: socket LocalPort = 9446 → listener = Prod
+    Gate-->>Gate: path must be /api/v1/* (UI/admin → 404)
+    Gate->>RL: per-key fixed window (default 300/min)
+    RL->>F: authenticate
+    F->>DB: lookup client by prefix, constant-time hash compare
+    F-->>F: key env == port env? enabled? not expired? source IP in CIDR?
+    alt any check fails
+        F->>Au: api.authenticate · Denied · reason
+        F-->>App: 401 (generic message)
+    end
+    F->>S: resolve(Prod, "billing/oracle-main") if granted
+    S->>DB: current SecretVersion
+    S-->>S: unwrap DEK with KEK, decrypt (AAD = secret|id|env|version)
+    S->>Au: api.read-connection · Success · v3
+    S-->>App: 200 {connectionString, components, version}<br/>Cache-Control: no-store
+    K->>Act: queue activity row (client, env, path, status, latency)

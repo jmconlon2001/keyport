@@ -5,7 +5,7 @@ obj/
 *.db
 *.db-shm
 *.db-wal
-.localdata/
-secrets/
+/.localdata/
+/secrets/
 TestResults/
 .DS_Store

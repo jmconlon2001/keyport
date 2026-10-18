@@ -1,0 +1,129 @@
+@page "/activity"
+@attribute [Authorize(Roles = $"{Keyport.Server.Data.Roles.Admin},{Keyport.Server.Data.Roles.Auditor}")]
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@inherits AppPageBase
+@using Microsoft.Extensions.Options
+@using Keyport.Server.Configuration
+@using Keyport.Server.Data
+@inject ActivityLogger ActivityLogs
+@inject IOptions<KeyportOptions> Options
+
+<PageTitle>Activity log · Keyport</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>Activity log</h1>
+        <p class="page-subtitle">Every API request and every UI action, with status and latency.</p>
+    </div>
+    <div class="page-actions">
+        <button class="btn btn-outline-secondary" @onclick="LoadAsync"><i class="i i-refresh"></i> Refresh</button>
+        <a class="btn btn-outline-secondary" href="@ExportUrl" target="_blank"><i class="i i-download"></i> Export CSV</a>
+    </div>
+</div>
+
+<div class="toolbar">
+    <div class="segmented">
+        <button class="@(source == LogSource.Api ? "active" : "")" @onclick="() => SetSource(LogSource.Api)"><i class="i i-plug"></i> API requests</button>
+        <button class="@(source == LogSource.Ui ? "active" : "")" @onclick="() => SetSource(LogSource.Ui)"><i class="i i-user"></i> UI activity</button>
+        <button class="@(source is null ? "active" : "")" @onclick="() => SetSource(null)">All</button>
+    </div>
+    <span class="text-muted small ms-auto">
+        Retention: API @Days(Options.Value.Logs.ApiLogRetentionDays) · UI @Days(Options.Value.Logs.UiLogRetentionDays)
+    </span>
+</div>
+
+<div class="card mb-3">
+    <div class="card-body">
+        <div class="row g-2">
+            <div class="col-md-3"><input class="form-control" placeholder="Client / user" @bind="actor" @bind:event="oninput" @bind:after="Search" /></div>
+            <div class="col-md-4"><input class="form-control" placeholder="Path or secret name" @bind="path" @bind:event="oninput" @bind:after="Search" /></div>
+            <div class="col-6 col-md-3">
+                <select class="form-select" @bind="environment" @bind:after="Search">
+                    <option value="">All environments</option>
+                    @foreach (var e in Environments.All) { <option value="@e.Name">@e.Name</option> }
+                </select>
+            </div>
+            <div class="col-6 col-md-2">
+                <select class="form-select" @bind="minStatus" @bind:after="Search">
+                    <option value="">Any status</option>
+                    <option value="400">Errors (4xx+)</option>
+                    <option value="500">Server errors (5xx)</option>
+                </select>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card card-flush">
+    <div class="table-wrap">
+        <table class="table table-cards">
+            <thead><tr><th>Time (UTC)</th><th>Source</th><th>Env</th><th>Who</th><th>Request</th><th>Status</th><th>Latency</th><th>IP</th></tr></thead>
+            <tbody>
+                @foreach (var a in items)
+                {
+                    <tr>
+                        <td data-label="Time" class="cell-mono">@a.TimestampUtc.ToString("yyyy-MM-dd HH:mm:ss")</td>
+                        <td data-label="Source"><span class="pill @(a.Source == LogSource.Api ? "pill-accent" : "pill-muted")">@a.Source</span></td>
+                        <td data-label="Env">@if (Environments.ByName(a.Environment) is { } e){<EnvBadge Env="e" />} else {<span class="text-muted">—</span>}</td>
+                        <td data-label="Who" class="cell-main">@a.Actor</td>
+                        <td class="td-primary">
+                            <span class="cell-mono"><strong>@a.Method</strong> @a.Path</span>
+                            @if (a.Action is not null && a.Action != "api.request" && a.Action != "ui.request"){<div class="cell-sub"><code>@a.Action</code> @a.Target</div>}
+                            else if (a.Target is not null){<div class="cell-sub">@a.Target</div>}
+                            @if (a.Error is not null){<div class="cell-sub text-danger">@a.Error</div>}
+                        </td>
+                        <td data-label="Status"><span class="pill @StatusPill(a.StatusCode)">@a.StatusCode</span></td>
+                        <td data-label="Latency" class="cell-mono">@(a.DurationMs > 0 ? $"{a.DurationMs:0.#} ms" : "—")</td>
+                        <td data-label="IP" class="cell-mono cell-sub">@a.ClientIp</td>
+                    </tr>
+                }
+                @if (items.Count == 0)
+                {
+                    <tr><td colspan="8"><div class="empty"><i class="i i-activity"></i><h3>No activity matches</h3></div></td></tr>
+                }
+            </tbody>
+        </table>
+    </div>
+    <Pager Skip="skip" Take="Take" Total="total" OnPage="PageAsync" />
+</div>
+
+<ToastHost Items="Toasts" />
+
+@code {
+    private const int Take = 50;
+    private List<Keyport.Server.Data.ActivityLog> items = [];
+    private int total, skip;
+    private string? source = LogSource.Api, actor, path, environment, minStatus;
+
+    private string ExportUrl =>
+        $"admin/api/activity/export.csv?source={source}&actor={Uri.EscapeDataString(actor ?? "")}&path={Uri.EscapeDataString(path ?? "")}&environment={Uri.EscapeDataString(environment ?? "")}&minStatus={minStatus}";
+
+    protected override Task OnPageInitializedAsync() => LoadAsync();
+
+    private async Task SetSource(string? s)
+    {
+        source = s;
+        await Search();
+    }
+
+    private async Task Search()
+    {
+        skip = 0;
+        await LoadAsync();
+    }
+
+    private async Task PageAsync(int s)
+    {
+        skip = s;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        int? ms = int.TryParse(minStatus, out var m) ? m : null;
+        (items, total) = await ActivityLogs.QueryAsync(new ActivityQuery(source, environment, actor, path, ms, Skip: skip, Take: Take));
+    }
+
+    private static string StatusPill(int s) => s switch { < 300 => "pill-success", < 400 => "pill-info", < 500 => "pill-warning", _ => "pill-danger" };
+    private static string Days(int d) => d <= 0 ? "forever" : $"{d} days";
+}

@@ -1,0 +1,90 @@
+@page "/system/health"
+@attribute [Authorize]
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@inherits AppPageBase
+@implements IDisposable
+@using Microsoft.Extensions.Diagnostics.HealthChecks
+@inject HealthCheckService HealthChecks
+
+<PageTitle>Health · Keyport</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>Health</h1>
+        <p class="page-subtitle">Live health checks. Probes: <code>/health/live</code> (liveness), <code>/health/ready</code> (readiness), <code>/health</code> (full JSON), available on every port.</p>
+    </div>
+    <div class="page-actions">
+        <button class="btn btn-outline-secondary" disabled="@Busy" @onclick="RunChecksAsync"><i class="i i-refresh"></i> Re-run checks</button>
+    </div>
+</div>
+
+@if (report is not null)
+{
+    <div class="health-hero @report.Status">
+        <div class="hero-icon"><i class="i @(report.Status == HealthStatus.Healthy ? "i-check" : "i-alert")"></i></div>
+        <div>
+            <h2>@(report.Status switch { HealthStatus.Healthy => "All systems nominal", HealthStatus.Degraded => "Degraded: attention needed", _ => "Unhealthy: action required" })</h2>
+            <p>@report.Entries.Count checks in @report.TotalDuration.TotalMilliseconds.ToString("0") ms · last run @checkedAt.ToString("HH:mm:ss") UTC</p>
+        </div>
+    </div>
+
+    <div class="card card-flush">
+        @foreach (var (name, e) in report.Entries)
+        {
+            <div class="check-row">
+                <div class="check-status @e.Status"><i class="i @(e.Status == HealthStatus.Healthy ? "i-check" : "i-alert")"></i></div>
+                <div class="flex-grow-1 min-w-0">
+                    <div class="d-flex justify-content-between gap-2 flex-wrap">
+                        <span class="check-name">@Title(name)</span>
+                        <span class="d-flex gap-2 align-items-center">
+                            @if (e.Tags.Contains("ready")){<span class="pill pill-muted">readiness</span>}
+                            <span class="pill @(e.Status == HealthStatus.Healthy ? "pill-success" : e.Status == HealthStatus.Degraded ? "pill-warning" : "pill-danger")">@e.Status</span>
+                            <span class="text-muted small cell-mono">@e.Duration.TotalMilliseconds.ToString("0.0") ms</span>
+                        </span>
+                    </div>
+                    <div class="check-desc">@e.Description</div>
+                    @if (e.Data.Count > 0)
+                    {
+                        <div class="d-flex flex-wrap gap-2 mt-2">
+                            @foreach (var (k, v) in e.Data)
+                            {
+                                <span class="pill pill-muted cell-mono">@k: @Format(v)</span>
+                            }
+                        </div>
+                    }
+                    @if (e.Exception is not null)
+                    {
+                        <div class="small text-danger mt-1">@e.Exception.Message</div>
+                    }
+                </div>
+            </div>
+        }
+    </div>
+}
+
+<ToastHost Items="Toasts" />
+
+@code {
+    private HealthReport? report;
+    private DateTime checkedAt;
+    private Timer? timer;
+
+    protected override async Task OnPageInitializedAsync()
+    {
+        await RunChecksAsync();
+        timer = new Timer(_ => InvokeAsync(async () => { await RunChecksAsync(); StateHasChanged(); }), null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+    }
+
+    private async Task RunChecksAsync()
+    {
+        Busy = true;
+        report = await HealthChecks.CheckHealthAsync();
+        checkedAt = DateTime.UtcNow;
+        Busy = false;
+    }
+
+    private static string Title(string name) => string.Join(' ', name.Split('-').Select(p => char.ToUpperInvariant(p[0]) + p[1..]));
+    private static string Format(object v) => v is DateTime d ? d.ToString("yyyy-MM-dd") : v.ToString() ?? "";
+
+    public void Dispose() => timer?.Dispose();
+}

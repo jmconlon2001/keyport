@@ -1,0 +1,45 @@
+﻿@inherits LayoutComponentBase
+
+<input type="checkbox" id="nav-toggle" class="nav-toggle" aria-hidden="true" />
+<div class="app-shell">
+    <aside class="sidebar" aria-label="Main navigation">
+        <NavMenu />
+    </aside>
+    <label for="nav-toggle" class="sidebar-scrim" aria-hidden="true"></label>
+
+    <div class="main">
+        <header class="topbar">
+            <label for="nav-toggle" class="icon-btn d-lg-none" title="Menu"><i class="i i-menu"></i></label>
+            <a class="topbar-brand d-lg-none" href=""><img class="brand-mark brand-logo" src="img/logo-mark.svg" alt="" /> Keyport</a>
+            <div class="topbar-spacer"></div>
+            <AuthorizeView>
+                <Authorized>
+                    <a class="topbar-chip nominal d-none d-md-inline-flex" href="system/health" title="System health"><span class="dot dot-live"></span> Systems nominal</a>
+                </Authorized>
+            </AuthorizeView>
+            <button type="button" class="icon-btn" data-theme-toggle title="Toggle light/dark theme" aria-label="Toggle theme">
+                <i class="i i-moon theme-dark-hide"></i><i class="i i-sun theme-light-hide"></i>
+            </button>
+            <AuthorizeView>
+                <Authorized>
+                    <a class="avatar" href="Account/Manage" title="@context.User.DisplayName()">@Initials(context.User.DisplayName())</a>
+                </Authorized>
+            </AuthorizeView>
+        </header>
+
+        <main class="content" id="main">
+            @Body
+        </main>
+    </div>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    <i class="i i-alert"></i> An unexpected error occurred.
+    <a href="." class="reload">Reload</a>
+    <span class="dismiss">✕</span>
+</div>
+
+@code {
+    private static string Initials(string? name) =>
+        string.IsNullOrWhiteSpace(name) ? "?" : string.Concat(name.Split(['.', ' ', '_', '-'], StringSplitOptions.RemoveEmptyEntries).Take(2).Select(p => char.ToUpperInvariant(p[0])));
+}

@@ -1,4 +1,14 @@
-# SecretManager
+<p align="center">
+  <img src="docs/banner.svg" alt="Keyport Banner" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://github.com/jmconlon2001/keyport/actions/workflows/ci.yml"><img src="https://github.com/jmconlon2001/keyport/actions/workflows/ci.yml/badge.svg?branch=main" alt="Build Status"></a>
+  <a href="https://github.com/jmconlon2001/keyport/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License"></a>
+  <a href="https://github.com/jmconlon2001/keyport"><img src="https://img.shields.io/badge/deepspace-enabled-purple?style=flat-square" alt="Theme"></a>
+</p>
+
+---
 
 A self-contained, containerized service that stores and serves **database connection strings (Oracle and SQL Server)** and **credentials (basic auth and service accounts)**, replacing the legacy WCF service.
 
@@ -11,7 +21,7 @@ A self-contained, containerized service that stores and serves **database connec
 - One container, one volume, one secret (the master key).
 
 <p align="center">
-  <img src="docs/images/02-dashboard-dark.png" alt="SecretManager dashboard" width="900">
+  <img src="docs/images/02-dashboard-dark.png" alt="Keyport dashboard" width="900">
 </p>
 
 <p align="center"><em>Shown with the built-in demo data for the fictional company "Nimbus Orbital". Try it yourself with <code>--seed-demo</code> (see <a href="#103-try-it-with-demo-data">10.3</a>).</em></p>
@@ -66,14 +76,14 @@ A self-contained, containerized service that stores and serves **database connec
 |---|---|
 | Runtime | .NET 10 (LTS), ASP.NET Core, Kestrel; single process |
 | UI | Blazor (interactive server rendering), Bootstrap 5.3 + custom design system, light/dark, responsive (desktop first, works on phones) |
-| Storage | SQLite (WAL) on a mounted volume, `/data/secretmanager.db` |
+| Storage | SQLite (WAL) on a mounted volume, `/data/keyport.db` |
 | Encryption at rest | AES-256-GCM envelope encryption: a random data key (DEK) per secret version, wrapped by a 256-bit master key (KEK) |
-| Master key | File supplied as a container secret (`/run/secrets/sm_master_key`); never stored by the app |
+| Master key | File supplied as a container secret (`/run/secrets/keyport_master_key`); never stored by the app |
 | TLS | Built-in internal CA (ECDSA P-384 root, 10 years). The server certificate (ECDSA P-256, 90 days) auto-renews at two-thirds of its lifetime with zero downtime. An enterprise CA can be imported instead. |
 | Edge / reverse proxy | In-process Kestrel edge: TLS termination, port-to-environment binding, security headers, rate limiting, request limits. **Reverse-proxy routes managed in the UI** (YARP): applied live, stored in the database, persisted across restarts; plus optional routes from configuration. |
 | Environments | Dev :9443 · Test :9444 · Upgrade :9445 · Prod :9446 (configurable; add or remove environments without code changes) |
 | Human auth | Local accounts (ASP.NET Core Identity). **MFA is mandatory** (TOTP authenticator or passkey/WebAuthn), plus lockout and a forced password change on first sign-in. |
-| Machine auth | API keys `sm_<prefix>_<secret>` (256-bit). Stored as SHA-256. Each key is bound to one environment, with grants chosen from existing secrets and an optional CIDR allow-list. **Keys never expire by default** (an expiry date is optional). The **key's age** is shown everywhere, and keys over a year old are flagged. |
+| Machine auth | API keys `kp_<prefix>_<secret>` (256-bit). Stored as SHA-256. Each key is bound to one environment, with grants chosen from existing secrets and an optional CIDR allow-list. **Keys never expire by default** (an expiry date is optional). The **key's age** is shown everywhere, and keys over a year old are flagged. |
 | Authorization | Global roles Admin and Auditor; per-environment roles Viewer and Editor. **Protected environments** (Upgrade, Prod) require a reason for every reveal or change. |
 | Audit | Append-only, SHA-256 hash-chained audit trail of every security event. Verified hourly and on demand. |
 | Activity log | Every API request and every UI request or action, with status and latency. Retention is configurable per source. |
@@ -97,7 +107,7 @@ flowchart LR
         U[Administrators / users<br/>browser]
     end
 
-    subgraph Container["secretmanager container (non-root, read-only FS)"]
+    subgraph Container["keyport container (non-root, read-only FS)"]
         direction TB
         H[":8080 HTTP<br/>bootstrap"]
         ADM[":8443 HTTPS<br/>Admin UI + admin API"]
@@ -113,7 +123,7 @@ flowchart LR
     end
 
     VOL[("/data volume<br/>SQLite · CA keys (encrypted) ·<br/>data-protection keys (encrypted)")]
-    KEK[["/run/secrets/sm_master_key<br/>(container secret)"]]
+    KEK[["/run/secrets/keyport_master_key<br/>(container secret)"]]
 
     A1 -->|"Bearer key (Dev)"| D
     A2 --> T
@@ -135,14 +145,14 @@ In a typical enterprise network, the per-environment ports are opened only from 
 ### 2.2 Component view (source layout)
 
 ```
-SecretManager.sln
-├── src/SecretManager.Core/              Pure logic, no web dependencies
+Keyport.sln
+├── src/Keyport.Core/              Pure logic, no web dependencies
 │   ├── Crypto/  MasterKey · EnvelopeEncryptor · ApiKeys · PasswordGenerator
 │   ├── Pki/     CertificateAuthority (create root, issue/renew server certs)
 │   ├── Secrets/ SecretType · SecretMetadata · SecretPayload · ConnectionStringFactory · SecretNames (grants)
 │   └── Audit/   AuditChain (hash-chain computation/verification)
-├── src/SecretManager.Server/            ASP.NET Core host
-│   ├── SecretManagerApp.cs              Composition root: DI, Kestrel listeners, auth, pipeline, startup
+├── src/Keyport.Server/            ASP.NET Core host
+│   ├── KeyportApp.cs              Composition root: DI, Kestrel listeners, auth, pipeline, startup
 │   ├── Cli.cs                           --healthcheck · --generate-master-key · --rotate-kek
 │   ├── Configuration/                   Strongly-typed options
 │   ├── Edge/                            PortGate · SecurityHeaders · ActivityLogging · KEK XML encryptor
@@ -154,13 +164,14 @@ SecretManager.sln
 │   ├── Data/                            EF Core DbContext, entities, migrations
 │   ├── Components/                      Blazor UI (Layout, Pages, Shared, Account/Identity pages)
 │   └── wwwroot/                         app.css design system, icons (inline SVG), JS helpers
-├── tests/SecretManager.Tests/           xUnit unit + integration tests
+├── tests/Keyport.Tests/           xUnit unit + integration tests
 ├── samples/                             C# client, PowerShell, shell
-├── docs/                                Migration guide, screenshots (docs/images)
+├── docs/                                Migration guide, screenshots (docs/images), brand assets: logo.svg (mark + wordmark),
+                                     logo-mark.svg (mark only), banner.svg; app icon/favicon in wwwroot/img/logo-mark.svg
 ├── Dockerfile · compose.yaml
 ```
 
-`SecretManager.Core` has no dependency on ASP.NET. The cryptography, CA, connection-string and audit-chain logic can be reviewed and tested in isolation.
+`Keyport.Core` has no dependency on ASP.NET. The cryptography, CA, connection-string and audit-chain logic can be reviewed and tested in isolation.
 
 ### 2.3 Request flow: an application reads a connection string
 
@@ -246,7 +257,7 @@ The integration test `EveryKeyIsRejectedOnEveryOtherEnvironmentPort` tests all 1
 | XSS / clickjacking / CSRF | Strict CSP (`script-src 'self'`, no inline scripts, no third-party origins), `X-Frame-Options: DENY`, `frame-ancestors 'none'`, antiforgery tokens on all forms, SameSite=Strict |
 | Downgrade / MITM | HTTPS only for every authenticated surface; TLS 1.2/1.3 only; HSTS. HTTP :8080 serves only the public CA certificate and health. |
 | Open redirect | The HTTP→HTTPS redirect only targets configured host names, never an arbitrary `Host` header. |
-| Proxy routes abused for SSRF or to expose services | Admin-only, reason required, audited. Ports must be chosen explicitly (404 elsewhere). Link-local and cloud-metadata upstreams are always refused. An optional **configuration-only** allow-list (`Proxy:AllowedUpstreams`) restricts upstream hosts. Paths owned by SecretManager cannot be shadowed. |
+| Proxy routes abused for SSRF or to expose services | Admin-only, reason required, audited. Ports must be chosen explicitly (404 elsewhere). Link-local and cloud-metadata upstreams are always refused. An optional **configuration-only** allow-list (`Proxy:AllowedUpstreams`) restricts upstream hosts. Paths owned by Keyport cannot be shadowed. |
 | Shoulder-surfing / over-exposure in the UI | Values are masked by default. Reveal needs a confirmation (and a reason in protected environments), auto-hides after 30 s, and is audited. Copy-to-clipboard is audited. |
 | Insider misuse | Per-environment least privilege. Protected-environment reasons are captured in the audit trail. Auditor role for read-only oversight. Every UI page view and action is in the activity log. |
 | Container escape / lateral movement | Distroless image (no shell or package manager), non-root, read-only root FS, `cap_drop: ALL`, `no-new-privileges` |
@@ -269,29 +280,29 @@ AAD        = "secret|{secretId}|{environmentId}|{version}"
 - DEKs are zeroed after use. Nonces are 96-bit random values; each DEK encrypts exactly one message, so nonce reuse cannot occur.
 
 **Master key (KEK)**:
-- 32 bytes, supplied as a file: raw bytes, 64 hex characters, or base64. Generate with `openssl rand -base64 32` or `dotnet SecretManager.Server.dll --generate-master-key`.
-- Read from `/run/secrets/sm_master_key` (container secret) or `SM_MASTER_KEY_FILE`.
+- 32 bytes, supplied as a file: raw bytes, 64 hex characters, or base64. Generate with `openssl rand -base64 32` or `dotnet Keyport.Server.dll --generate-master-key`.
+- Read from `/run/secrets/keyport_master_key` (container secret) or `KEYPORT_MASTER_KEY_FILE`.
 - **Back it up separately from the data volume.** Without it, nothing can be decrypted. That is the point.
 
 **KEK rotation** (offline, a few seconds): stop the service, then run
 
 ```bash
-podman run --rm -v secretmanager_sm-data:/data \
-  -v ./secrets/sm_master_key:/run/secrets/sm_master_key:ro \
-  -v ./secrets/sm_master_key.new:/new.key:ro \
-  localhost/secretmanager:latest --rotate-kek /new.key
+podman run --rm -v keyport-data:/data \
+  -v ./secrets/keyport_master_key:/run/secrets/keyport_master_key:ro \
+  -v ./secrets/keyport_master_key.new:/new.key:ro \
+  localhost/keyport:latest --rotate-kek /new.key
 ```
 
 This re-wraps every DEK, both CA private keys and all data-protection keys under the new KEK in one transaction. The ciphertexts themselves are untouched. The old key files are backed up to `/data/kek-rotation-backup-<timestamp>` first, and a `kek.rotate` audit event is written. Then replace the secret file with the new key and **recreate** the container. The secret is a bind mount, so a stopped container keeps pointing at the old file:
 
 ```bash
-mv secrets/sm_master_key secrets/sm_master_key.old && mv secrets/sm_master_key.new secrets/sm_master_key
+mv secrets/keyport_master_key secrets/keyport_master_key.old && mv secrets/keyport_master_key.new secrets/keyport_master_key
 podman compose up -d --force-recreate
 ```
 
 Starting with the old key afterwards is refused ("encrypted with master key(s) … Refusing to start"), and the process exits with code 1. This procedure was verified end to end on the container: the API returned 200 for the same secret before and after rotation, and the old key was rejected.
 
-**API keys**: `sm_` + 8-character public prefix (lookup) + `_` + 43 characters from a 62-symbol alphabet (about 256 bits). Stored as SHA-256 hex. A slow hash is unnecessary because the input is not guessable.
+**API keys**: `kp_` + 8-character public prefix (lookup) + `_` + 43 characters from a 62-symbol alphabet (about 256 bits). Stored as SHA-256 hex. A slow hash is unnecessary because the input is not guessable.
 
 **Generated passwords**: CSPRNG; at least one upper, lower, digit and symbol; symbols limited to characters that never need escaping in connection strings (no `; = ' " { }` or space).
 
@@ -399,7 +410,7 @@ Available on **every port**, unauthenticated, and containing no secrets:
 | `GET /health/ready` | Readiness | database, master-key, certificates |
 | `GET /health` | Full JSON report (200 when Healthy or Degraded, 503 when Unhealthy) | database, master-key (loaded key matches stored data), certificates (expiry of server cert and CA), disk-space (data volume), audit-chain (last verification), background-jobs (renewal, verification, retention, activity queue) |
 
-The container `HEALTHCHECK` calls `dotnet SecretManager.Server.dll --healthcheck`, which probes `/health/live`; the distroless image has no curl.
+The container `HEALTHCHECK` calls `dotnet Keyport.Server.dll --healthcheck`, which probes `/health/live`; the distroless image has no curl.
 
 ### 5.4 Status
 
@@ -415,7 +426,7 @@ Applications can call `GET /api/v1/status` on their environment port to confirm 
 
 ### 5.5 Process logs
 
-Standard ASP.NET Core console logging goes to stdout (`podman logs secretmanager`). Secret values are never written to process logs. Driver error messages from "test connection" have the password scrubbed.
+Standard ASP.NET Core console logging goes to stdout (`podman logs keyport`). Secret values are never written to process logs. Driver error messages from "test connection" have the password scrubbed.
 
 ---
 
@@ -461,7 +472,7 @@ Connection strings are built by the drivers' own builders (`SqlConnectionStringB
 
 | Path | Content | Protection |
 |---|---|---|
-| `secretmanager.db` (+ `-wal`, `-shm`) | All data | Secret values KEK-encrypted |
+| `keyport.db` (+ `-wal`, `-shm`) | All data | Secret values KEK-encrypted |
 | `ca/root.crt`, `ca/server.crt` | Public certificates | Public |
 | `ca/root.key.enc`, `ca/server.key.enc` | CA and server private keys | KEK-encrypted (JSON envelope) |
 | `dp-keys/*.xml` | ASP.NET data-protection key ring (cookies, antiforgery) | KEK-encrypted via `KekXmlEncryptor` |
@@ -471,7 +482,7 @@ Connection strings are built by the drivers' own builders (`SqlConnectionStringB
 ## 7. REST API reference
 
 **Base URL**: `https://<host>:<environment port>/api/v1`. The port selects the environment.
-**Auth**: `Authorization: Bearer sm_<prefix>_<secret>` (or `X-Api-Key: …`).
+**Auth**: `Authorization: Bearer kp_<prefix>_<secret>` (or `X-Api-Key: …`).
 **Format**: JSON (camelCase). All responses carry `Cache-Control: no-store`.
 **OpenAPI**: `https://<host>:8443/openapi/v1.json` (signed-in users).
 
@@ -488,9 +499,9 @@ Connection strings are built by the drivers' own builders (`SqlConnectionStringB
 **Example**
 
 ```bash
-curl --cacert secretmanager-ca.crt \
-     -H "Authorization: Bearer $SM_API_KEY" \
-     https://secretmanager.corp.local:9446/api/v1/connections/billing/oracle-main
+curl --cacert keyport-ca.crt \
+     -H "Authorization: Bearer $KEYPORT_API_KEY" \
+     https://keyport.corp.local:9446/api/v1/connections/billing/oracle-main
 ```
 
 ```json
@@ -558,34 +569,34 @@ The UI is desktop-first and responsive: the sidebar becomes a slide-out drawer a
 
 ## 9. Configuration reference
 
-Configuration comes from `appsettings.json` and can be overridden by environment variables using `__` for nesting (e.g. `SecretManager__Logs__ApiLogRetentionDays=30`) or by a mounted `appsettings.Production.json`.
+Configuration comes from `appsettings.json` and can be overridden by environment variables using `__` for nesting (e.g. `Keyport__Logs__ApiLogRetentionDays=30`) or by a mounted `appsettings.Production.json`.
 
 | Key | Default | Description |
 |---|---|---|
-| `SecretManager:DataPath` | `/data` | Volume for the database, CA and key ring |
-| `SecretManager:MasterKeyFile` | `/run/secrets/sm_master_key` | KEK file. `SM_MASTER_KEY_FILE` overrides it. |
-| `SecretManager:BootstrapAdminUser` | `admin` | First administrator account name |
-| `SecretManager:Edge:HttpPort` | `8080` | Bootstrap HTTP port (`0` disables it) |
-| `SecretManager:Edge:AdminPort` | `8443` | Admin UI / admin API port |
-| `SecretManager:Edge:BindAddress` | `0.0.0.0` | Default bind address (`*`/`::` for IPv6 any) |
-| `SecretManager:Edge:HostNames[]` | `localhost, secretmanager` | DNS names placed in the TLS certificate. **Set these to the names clients use.** |
-| `SecretManager:Edge:IpAddresses[]` | `127.0.0.1` | IP SANs |
-| `SecretManager:Edge:ApiRequestsPerMinute` | `300` | Rate limit per API key |
-| `SecretManager:Ca:CommonName` | `SecretManager Root CA` | Root CA subject |
-| `SecretManager:Ca:RootLifetimeDays` | `3650` | Root lifetime |
-| `SecretManager:Ca:LeafLifetimeDays` | `90` | Server certificate lifetime (renewed at 2/3) |
-| `SecretManager:Ca:ImportPfxPath` | – | Use an enterprise CA instead of a generated root |
-| `SecretManager:Ca:ImportPfxPasswordFile` | – | Password file for the PFX |
-| `SecretManager:Logs:ApiLogRetentionDays` | `90` | API activity retention (0 = forever) |
-| `SecretManager:Logs:UiLogRetentionDays` | `90` | UI activity retention (0 = forever) |
-| `SecretManager:Logs:AuditRetentionDays` | `0` | Audit retention (0 = forever) |
-| `SecretManager:Logs:PurgeIntervalHours` | `24` | Retention job frequency |
-| `SecretManager:Environments[i]:Name` | Dev/Test/Upgrade/Prod | Display name (also the key used to match DB rows) |
-| `SecretManager:Environments[i]:Port` | 9443–9446 | Listener port (must be unique) |
-| `SecretManager:Environments[i]:Color` | green/blue/amber/red | UI accent |
-| `SecretManager:Environments[i]:Protected` | Upgrade, Prod = `true` | Require reasons and show a warning banner |
-| `SecretManager:Environments[i]:BindAddress` | – | Bind this environment to a specific interface |
-| `SecretManager:Proxy:AllowedUpstreams[]` | empty | Optional allow-list for UI-managed proxy upstreams (§9.1) |
+| `Keyport:DataPath` | `/data` | Volume for the database, CA and key ring |
+| `Keyport:MasterKeyFile` | `/run/secrets/keyport_master_key` | KEK file. `KEYPORT_MASTER_KEY_FILE` overrides it. |
+| `Keyport:BootstrapAdminUser` | `admin` | First administrator account name |
+| `Keyport:Edge:HttpPort` | `8080` | Bootstrap HTTP port (`0` disables it) |
+| `Keyport:Edge:AdminPort` | `8443` | Admin UI / admin API port |
+| `Keyport:Edge:BindAddress` | `0.0.0.0` | Default bind address (`*`/`::` for IPv6 any) |
+| `Keyport:Edge:HostNames[]` | `localhost, keyport` | DNS names placed in the TLS certificate. **Set these to the names clients use.** |
+| `Keyport:Edge:IpAddresses[]` | `127.0.0.1` | IP SANs |
+| `Keyport:Edge:ApiRequestsPerMinute` | `300` | Rate limit per API key |
+| `Keyport:Ca:CommonName` | `Keyport Root CA` | Root CA subject |
+| `Keyport:Ca:RootLifetimeDays` | `3650` | Root lifetime |
+| `Keyport:Ca:LeafLifetimeDays` | `90` | Server certificate lifetime (renewed at 2/3) |
+| `Keyport:Ca:ImportPfxPath` | – | Use an enterprise CA instead of a generated root |
+| `Keyport:Ca:ImportPfxPasswordFile` | – | Password file for the PFX |
+| `Keyport:Logs:ApiLogRetentionDays` | `90` | API activity retention (0 = forever) |
+| `Keyport:Logs:UiLogRetentionDays` | `90` | UI activity retention (0 = forever) |
+| `Keyport:Logs:AuditRetentionDays` | `0` | Audit retention (0 = forever) |
+| `Keyport:Logs:PurgeIntervalHours` | `24` | Retention job frequency |
+| `Keyport:Environments[i]:Name` | Dev/Test/Upgrade/Prod | Display name (also the key used to match DB rows) |
+| `Keyport:Environments[i]:Port` | 9443–9446 | Listener port (must be unique) |
+| `Keyport:Environments[i]:Color` | green/blue/amber/red | UI accent |
+| `Keyport:Environments[i]:Protected` | Upgrade, Prod = `true` | Require reasons and show a warning banner |
+| `Keyport:Environments[i]:BindAddress` | – | Bind this environment to a specific interface |
+| `Keyport:Proxy:AllowedUpstreams[]` | empty | Optional allow-list for UI-managed proxy upstreams (§9.1) |
 | `ReverseProxy:Routes / Clusters` | empty | Optional proxy routes defined in configuration (§9.1) |
 
 The order of `Environments` is the **promotion order** (Dev → Test → Upgrade → Prod).
@@ -594,14 +605,14 @@ The order of `Environments` is the **promotion order** (Dev → Test → Upgrade
 
 ### 9.1 Reverse proxy
 
-SecretManager can publish internal services through its own TLS edge, using YARP (Microsoft's reverse proxy). Proxied requests get the same certificate, security headers, port gate and activity logging as everything else.
+Keyport can publish internal services through its own TLS edge, using YARP (Microsoft's reverse proxy). Proxied requests get the same certificate, security headers, port gate and activity logging as everything else.
 
 **Managing routes in the UI (Administration → Reverse proxy, Admin only)**
 
 | Field | Meaning |
 |---|---|
 | Name | Unique slug (`grafana`) |
-| Path prefix | `/grafana`: requests to `/grafana` and everything below it are forwarded. Top-level paths used by SecretManager (`/api`, `/admin`, `/Account`, `/secrets`, `/health`, `/_blazor`, …) are refused. |
+| Path prefix | `/grafana`: requests to `/grafana` and everything below it are forwarded. Top-level paths used by Keyport (`/api`, `/admin`, `/Account`, `/secrets`, `/health`, `/_blazor`, …) are refused. |
 | Upstream URL(s) | One per line. Several upstreams are load-balanced (PowerOfTwoChoices, RoundRobin, LeastRequests, Random, FirstAlphabetical). |
 | Serve on ports | Admin port and/or environment ports. The route returns **404 on every port not selected**. |
 | Who can use it | Signed-in users (MFA) · Admins & Auditors · Admins only · Anyone who can reach the port |
@@ -620,7 +631,7 @@ SecretManager can publish internal services through its own TLS edge, using YARP
 **Upstream allow-list (optional, configuration only)**:
 
 ```json
-"SecretManager": { "Proxy": { "AllowedUpstreams": [ "*.corp.local", "grafana.internal", "10.20.0.0/16" ] } }
+"Keyport": { "Proxy": { "AllowedUpstreams": [ "*.corp.local", "grafana.internal", "10.20.0.0/16" ] } }
 ```
 
 Entries can be an exact host, a `*.domain` wildcard, or a CIDR (matched against IP-literal upstreams). If the list is empty, any upstream is allowed except link-local and cloud-metadata addresses (169.254.0.0/16, fe80::/10, `metadata.google.internal`), which are always refused. The list can't be changed from the UI, so a compromised admin session cannot widen it.
@@ -634,7 +645,7 @@ Entries can be an exact host, a `*.domain` wildcard, or a CIDR (matched against 
 }
 ```
 
-**Putting SecretManager behind your own proxy** (F5, nginx, an application gateway) is a different setup. Use **TCP/TLS passthrough per port**: the environment is decided by the port the connection arrives on, and `X-Forwarded-*` headers are deliberately ignored.
+**Putting Keyport behind your own proxy** (F5, nginx, an application gateway) is a different setup. Use **TCP/TLS passthrough per port**: the environment is decided by the port the connection arrives on, and `X-Forwarded-*` headers are deliberately ignored.
 
 ---
 
@@ -644,25 +655,25 @@ Entries can be an exact host, a `*.domain` wildcard, or a CIDR (matched against 
 
 ```bash
 # 1. Master key: keep a secure, separate backup of this file
-mkdir -p secrets && openssl rand -base64 32 > secrets/sm_master_key && chmod 644 secrets/sm_master_key && chmod 700 secrets
+mkdir -p secrets && openssl rand -base64 32 > secrets/keyport_master_key && chmod 644 secrets/keyport_master_key && chmod 700 secrets
 
-# 2. Set the DNS names clients will use in compose.yaml (SecretManager__Edge__HostNames__N)
+# 2. Set the DNS names clients will use in compose.yaml (Keyport__Edge__HostNames__N)
 
 # 3. Build and start
-podman build --format docker -t localhost/secretmanager:latest .   # --format docker keeps the HEALTHCHECK
+podman build --format docker -t localhost/keyport:latest .   # --format docker keeps the HEALTHCHECK
 podman compose up -d
 
 # 4. First sign-in: get the one-time admin password
-podman logs secretmanager 2>&1 | grep -A3 "Bootstrap administrator"
+podman logs keyport 2>&1 | grep -A3 "Bootstrap administrator"
 
 # 5. Trust the CA (verify the fingerprint against the log or Certificates page first)
-curl -s http://localhost:8080/ca.crt -o secretmanager-ca.crt
-openssl x509 -in secretmanager-ca.crt -noout -fingerprint -sha256
+curl -s http://localhost:8080/ca.crt -o keyport-ca.crt
+openssl x509 -in keyport-ca.crt -noout -fingerprint -sha256
 
 # 6. Open https://<host>:8443: sign in, change the password, enrol MFA
 ```
 
-`secrets/sm_master_key` must be readable by UID 1654 inside the container; mode `644` inside a `700` directory is the simplest way to achieve that with file-based compose secrets. On Kubernetes, use a Secret mounted at `/run/secrets/sm_master_key` with `defaultMode: 0400` and `fsGroup: 1654`.
+`secrets/keyport_master_key` must be readable by UID 1654 inside the container; mode `644` inside a `700` directory is the simplest way to achieve that with file-based compose secrets. On Kubernetes, use a Secret mounted at `/run/secrets/keyport_master_key` with `defaultMode: 0400` and `fsGroup: 1654`.
 
 ### 10.2 First-run checklist
 
@@ -680,8 +691,8 @@ Start an **empty** instance with `--seed-demo` to load data for the fictional co
 
 ```bash
 podman run -d --name sm-demo --init -p 8443:8443 -p 8080:8080 -p 9443-9446:9443-9446 \
-  -v sm-demo-data:/data -v ./secrets/sm_master_key:/run/secrets/sm_master_key:ro \
-  localhost/secretmanager:latest --seed-demo
+  -v sm-demo-data:/data -v ./secrets/keyport_master_key:/run/secrets/keyport_master_key:ro \
+  localhost/keyport:latest --seed-demo
 podman logs sm-demo 2>&1 | grep -A6 "DEMO data loaded"     # demo users and their shared password
 ```
 
@@ -704,6 +715,27 @@ It then runs the server and makes about 400 live API calls so the dashboard, Sta
 ### 10.5 Upgrades
 
 Build or pull the new image and run `podman compose up -d`. EF Core migrations run automatically at startup, and the data on the volume is kept. Downgrades are not supported once a newer migration has been applied; restore from backup instead.
+
+**Upgrading from SecretManager (the pre-rename name):** no manual changes are needed.
+- On first start, `secretmanager.db` is renamed to `keyport.db` (together with its WAL/SHM files).
+- `SecretManager:*` / `SecretManager__*` settings are still honoured.
+- So is `SM_MASTER_KEY_FILE`, and a container secret mounted as `/run/secrets/sm_master_key`.
+- **Existing `sm_…` API keys keep working**; new keys start with `kp_`.
+- Users must sign in once more, because the session cookie name changed.
+
+With compose, the project, container and volume names changed (`keyport`, `keyport-data`). To carry the data over:
+
+```bash
+podman stop secretmanager && podman rm secretmanager                 # old container (its volume is kept)
+podman volume create keyport-data
+podman volume export secretmanager_sm-data | podman volume import keyport-data -
+# the app runs as UID 1654 and must own its data (any small image with chown works)
+podman run --rm --user 0 -v keyport-data:/data --entrypoint chown docker.io/library/busybox -R 1654:1654 /data
+cp secrets/sm_master_key secrets/keyport_master_key
+podman compose up -d --build
+```
+
+The old `secretmanager_sm-data` volume is left untouched as a backup. Delete it with `podman volume rm secretmanager_sm-data` once you're satisfied.
 
 ### 10.6 Operational runbook
 
@@ -730,7 +762,7 @@ See **[docs/client-migration.md](docs/client-migration.md)** for the full guide:
 
 1. Re-create each connection or credential in the matching environment (use **Promote** to carry settings forward, entering each environment's password).
 2. Create one API client per application per environment, with narrow grants.
-3. Replace the WCF proxy call with one HTTPS GET to the environment's port, using the sample client in `samples/csharp/SecretManagerClient.cs`.
+3. Replace the WCF proxy call with one HTTPS GET to the environment's port, using the sample client in `samples/csharp/KeyportClient.cs`.
 4. Store the API key in the application's existing secret store (environment variable, Kubernetes secret, or a protected app setting), not in source.
 
 ---
@@ -740,15 +772,15 @@ See **[docs/client-migration.md](docs/client-migration.md)** for the full guide:
 ```bash
 # Prerequisites: .NET 10 SDK
 openssl rand -base64 32 > .localdata/master.key       # dev key (gitignored)
-ASPNETCORE_ENVIRONMENT=Development dotnet run --project src/SecretManager.Server
+ASPNETCORE_ENVIRONMENT=Development dotnet run --project src/Keyport.Server
 # → https://localhost:8443  (dev data in ./.localdata)
 
 dotnet test                                           # 109 tests, about 20 s
 
-dotnet ef migrations add <Name> -p src/SecretManager.Server -o Data/Migrations   # after model changes
+dotnet ef migrations add <Name> -p src/Keyport.Server -o Data/Migrations   # after model changes
 ```
 
-**Automated tests** (`tests/SecretManager.Tests`)
+**Automated tests** (`tests/Keyport.Tests`)
 
 | Area | Examples |
 |---|---|

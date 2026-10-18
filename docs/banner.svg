@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" width="100%" height="100%">
+  <defs>
+    <linearGradient id="banner-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090d16" />
+      <stop offset="50%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#1e1b4b" />
+    </linearGradient>
+    <radialGradient id="nebula" cx="88%" cy="15%" r="45%">
+      <stop offset="0%" stop-color="#1b5e5a" stop-opacity=".35" />
+      <stop offset="100%" stop-color="#0f172a" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="text-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#c084fc" />
+    </linearGradient>
+    <linearGradient id="card" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#d4e0ec" />
+      <stop offset="100%" stop-color="#bccddf" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="320" fill="url(#banner-bg)" rx="12" />
+  <rect width="1200" height="320" fill="url(#nebula)" rx="12" />
+
+  <!-- Starfield accents -->
+  <g fill="#ffffff" opacity="0.5">
+    <circle cx="100" cy="80" r="2" />
+    <circle cx="300" cy="260" r="3" />
+    <circle cx="950" cy="70" r="2.5" />
+    <circle cx="1100" cy="240" r="1.5" />
+    <circle cx="1040" cy="120" r="1.2" />
+  </g>
+
+  <!-- Keyport mark -->
+  <g transform="translate(180 160) scale(1.95) translate(-60 -60)">
+    <circle cx="60" cy="60" r="53.1" fill="none" stroke="#2a5d7b" stroke-width="5.6" />
+    <circle cx="60" cy="60" r="36.9" fill="none" stroke="#b07cf0" stroke-width="8.4" />
+    <rect x="45.35" y="54.7" width="29.3" height="15" rx="1.5" fill="url(#card)" transform="rotate(44 60 62.2)" />
+  </g>
+
+  <!-- Typography -->
+  <text x="320" y="150" font-family="Montserrat, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="64" font-weight="900" fill="url(#text-grad)" letter-spacing="2">KEYPORT</text>
+  <text x="324" y="200" font-family="-apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#94a3b8" letter-spacing="1">Secrets mission control · one port per environment</text>
+</svg>

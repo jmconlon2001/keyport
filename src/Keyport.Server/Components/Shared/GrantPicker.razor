@@ -1,0 +1,97 @@
+@* Choose API-client grants from what exists in the environment: all secrets, folders, or individual secrets. *@
+<div class="grant-picker">
+    <div class="grant-selected">
+        @if (Selected.Count == 0)
+        {
+            <span class="text-muted small">Nothing selected yet: pick secrets or folders below.</span>
+        }
+        @foreach (var g in Selected.Order())
+        {
+            var stale = Options.All(o => o.Pattern != g);
+            <span class="pill @(stale ? "pill-warning" : "pill-accent") cell-mono" title="@(stale ? "No longer matches any secret" : "")">
+                @(g == "*" ? $"* (all {EnvName} secrets)" : g)
+                @if (stale){<i class="i i-alert"></i>}
+                <button type="button" class="grant-remove" aria-label="Remove @g" @onclick="() => Toggle(g, false)"><i class="i i-x"></i></button>
+            </span>
+        }
+    </div>
+
+    @if (Options.Count == 0)
+    {
+        <div class="empty py-4"><i class="i i-key"></i><h3>No secrets in @EnvName yet</h3><p>Create secrets first, then grant this client access to them.</p></div>
+    }
+    else
+    {
+        <div class="input-icon my-2">
+            <i class="i i-search"></i>
+            <input class="form-control form-control-sm" placeholder="Filter secrets and folders…" @bind="filter" @bind:event="oninput" />
+        </div>
+        <div class="grant-list">
+            @foreach (var o in Visible())
+            {
+                var on = Selected.Contains(o.Pattern);
+                var covered = !on && IsCovered(o.Pattern);
+                <label class="grant-row @(on ? "on" : "") @(covered ? "covered" : "")" style="--depth:@Depth(o)">
+                    <input type="checkbox" class="form-check-input mt-0" checked="@(on || covered)" disabled="@covered"
+                           @onchange="e => Toggle(o.Pattern, (bool)e.Value!)" />
+                    @switch (o.Kind)
+                    {
+                        case GrantKind.All:
+                            <span class="type-icon type-Generic"><i class="i i-layers"></i></span>
+                            <span class="flex-grow-1"><strong>All secrets in @EnvName</strong> <span class="cell-mono text-muted">*</span><div class="cell-sub">Includes secrets created later</div></span>
+                            break;
+                        case GrantKind.Folder:
+                            <span class="type-icon type-Generic"><i class="i i-columns"></i></span>
+                            <span class="flex-grow-1"><span class="cell-mono fw-semibold">@o.Pattern</span><div class="cell-sub">Folder · includes secrets added later</div></span>
+                            break;
+                        default:
+                            <TypeIcon Type="o.Type!.Value" />
+                            <span class="flex-grow-1"><span class="cell-mono">@o.Pattern</span><div class="cell-sub">@o.Type!.Value.DisplayName()</div></span>
+                            break;
+                    }
+                    @if (o.Kind != GrantKind.Secret){<span class="pill pill-muted">@o.SecretCount @(o.SecretCount == 1 ? "secret" : "secrets")</span>}
+                </label>
+            }
+        </div>
+        <div class="form-text">Covered by: <strong>@CoveredCount()</strong> of @(Options.FirstOrDefault(o => o.Kind == GrantKind.All)?.SecretCount ?? 0) secrets in @EnvName.</div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public List<GrantOption> Options { get; set; } = [];
+    [Parameter, EditorRequired] public HashSet<string> Selected { get; set; } = [];
+    [Parameter] public string EnvName { get; set; } = "";
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    private string? filter;
+
+    private IEnumerable<GrantOption> Visible() =>
+        string.IsNullOrWhiteSpace(filter) ? Options : Options.Where(o => o.Kind == GrantKind.All || o.Pattern.Contains(filter.Trim(), StringComparison.OrdinalIgnoreCase));
+
+    private static int Depth(GrantOption o) => o.Kind == GrantKind.All ? 0 : o.Pattern.TrimEnd('*', '/').Count(c => c == '/') + (o.Kind == GrantKind.Folder ? 0 : 1);
+
+    /// <summary>True when a broader selected grant already includes this option.</summary>
+    private bool IsCovered(string pattern)
+    {
+        var probe = pattern.EndsWith("/*") ? pattern[..^2] + "/x" : pattern;
+        return Selected.Any(s => s != pattern && Keyport.Core.Secrets.SecretNames.MatchesGrant(probe, s));
+    }
+
+    private int CoveredCount() =>
+        Options.Where(o => o.Kind == GrantKind.Secret).Count(o => Selected.Any(s => Keyport.Core.Secrets.SecretNames.MatchesGrant(o.Pattern, s)));
+
+    private async Task Toggle(string pattern, bool on)
+    {
+        if (on)
+        {
+            Selected.Add(pattern);
+            // Drop narrower grants that the new one already covers.
+            Selected.RemoveWhere(s => s != pattern && Keyport.Core.Secrets.SecretNames.MatchesGrant(s.EndsWith("/*") ? s[..^2] + "/x" : s, pattern));
+        }
+        else
+        {
+            Selected.Remove(pattern);
+        }
+        await OnChanged.InvokeAsync();
+    }
+}

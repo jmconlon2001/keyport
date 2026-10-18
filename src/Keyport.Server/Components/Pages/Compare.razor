@@ -1,0 +1,88 @@
+@page "/compare"
+@attribute [Authorize]
+@rendermode InteractiveServer
+@inherits AppPageBase
+@inject SecretService Secrets
+
+<PageTitle>Compare environments · Keyport</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>Compare environments</h1>
+        <p class="page-subtitle">Which secrets exist where, in promotion order. Spot gaps before a release. Values are never shown here.</p>
+    </div>
+</div>
+
+<div class="toolbar">
+    <div class="input-icon grow">
+        <i class="i i-search"></i>
+        <input class="form-control" placeholder="Filter by name…" @bind="filter" @bind:event="oninput" />
+    </div>
+    <div class="form-check form-switch m-0">
+        <input class="form-check-input" type="checkbox" id="gaps" @bind="gapsOnly" />
+        <label class="form-check-label" for="gaps">Only show gaps</label>
+    </div>
+</div>
+
+<div class="card card-flush">
+    @if (rows is null)
+    {
+        <div class="empty"><div class="spinner-border spinner-border-sm"></div></div>
+    }
+    else
+    {
+        var shown = rows.Where(r => (string.IsNullOrWhiteSpace(filter) || r.Name.Contains(filter.Trim(), StringComparison.OrdinalIgnoreCase))
+                                    && (!gapsOnly || envs.Any(e => !r.VersionsByEnv.ContainsKey(e.Id)))).ToList();
+        <div class="table-wrap">
+            <table class="table matrix">
+                <thead>
+                    <tr>
+                        <th>Secret</th>
+                        @foreach (var e in envs)
+                        {
+                            <th class="text-center"><span class="env-badge" style="--env:@e.Color">@e.Name</span></th>
+                        }
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var r in shown)
+                    {
+                        <tr>
+                            <td><div class="d-flex align-items-center gap-2"><TypeIcon Type="r.Type" /><span class="cell-mono cell-main">@r.Name</span></div></td>
+                            @foreach (var e in envs)
+                            {
+                                if (r.VersionsByEnv.TryGetValue(e.Id, out var v))
+                                {
+                                    <td class="cell-has" title="v@(v)"><i class="i i-check"></i> <span class="cell-sub">v@(v)</span></td>
+                                }
+                                else
+                                {
+                                    <td class="cell-missing" title="Missing in @e.Name"><i class="i i-x"></i></td>
+                                }
+                            }
+                        </tr>
+                    }
+                    @if (shown.Count == 0)
+                    {
+                        <tr><td colspan="@(envs.Count + 1)"><div class="empty"><i class="i i-check"></i><h3>Nothing to show</h3></div></td></tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</div>
+
+<ToastHost Items="Toasts" />
+
+@code {
+    private List<EnvironmentInfo> envs = [];
+    private List<(string Name, SecretType Type, Dictionary<int, int> VersionsByEnv)>? rows;
+    private string? filter;
+    private bool gapsOnly;
+
+    protected override async Task OnPageInitializedAsync()
+    {
+        envs = Environments.All.Where(e => Access.CanView(e.Id)).ToList();
+        rows = await Secrets.CompareAsync(Access);
+    }
+}

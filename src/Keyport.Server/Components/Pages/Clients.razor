@@ -1,0 +1,369 @@
+@page "/clients"
+@page "/clients/{EnvName}"
+@attribute [Authorize]
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@inherits AppPageBase
+@inject ApiClientService ClientService
+@inject IJSRuntime JS
+
+<PageTitle>Applications · Keyport</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>Applications</h1>
+        <p class="page-subtitle">Each application gets a <strong>key</strong> that lets it read only the secrets you choose, and only in one environment.</p>
+    </div>
+    @if (env is not null && Access.CanEdit(env.Id))
+    {
+        <div class="page-actions"><button class="btn btn-primary" @onclick="() => NewClient(null)"><i class="i i-plus"></i> Add an application to @env.Name</button></div>
+    }
+</div>
+
+<div class="env-tabs">
+    @foreach (var e in visible)
+    {
+        <a class="env-tab @(e.Id == env?.Id ? "active" : "")" style="--env:@e.Color" href="@($"clients/{e.Name.ToLowerInvariant()}")">
+            <span class="env-dot" style="--env:@e.Color"></span>@e.Name
+        </a>
+    }
+</div>
+
+@if (env is not null)
+{
+    <div class="card card-flush">
+        @if (items is null)
+        {
+            <div class="empty"><div class="spinner-border spinner-border-sm"></div></div>
+        }
+        else if (items.Count == 0)
+        {
+            <div class="empty">
+                <i class="i i-plug"></i>
+                <h3>No applications in @env.Name yet</h3>
+                <p>Add an application to give it access to secrets. You'll get a key to hand to its owner.</p>
+                @if (Access.CanEdit(env.Id)){<button class="btn btn-primary mt-2" @onclick="() => NewClient(null)"><i class="i i-plus"></i> Add an application</button>}
+            </div>
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="table table-cards">
+                    <thead><tr><th>Application</th><th>Can read</th><th>Key</th><th>Key age</th><th>Last used</th><th></th></tr></thead>
+                    <tbody>
+                        @foreach (var c in items)
+                        {
+                            var expired = c.ExpiresUtc is { } x && x <= DateTime.UtcNow;
+                            <tr>
+                                <td class="td-primary">
+                                    <div class="cell-main">@c.Name @if (c.Disabled){<span class="pill pill-danger ms-1">turned off</span>} else if (expired){<span class="pill pill-warning ms-1">key expired</span>}</div>
+                                    <div class="cell-sub">@(c.Description ?? $"added by {c.CreatedBy}")</div>
+                                </td>
+                                <td data-label="Can read">
+                                    <div class="d-flex flex-wrap gap-1 justify-content-end justify-content-md-start">
+                                        @foreach (var g in c.Grants)
+                                        {
+                                            <span class="pill pill-accent cell-mono" title="@GrantTitle(g.Pattern)">@(g.Pattern == "*" ? "everything" : g.Pattern)</span>
+                                        }
+                                    </div>
+                                </td>
+                                <td data-label="Key" class="cell-sub">
+                                    <code title="Key ID (the public part of the key)">…@(c.KeyPrefix)…</code>
+                                    <div>@(c.ExpiresUtc is { } e2 ? $"expires {e2:d MMM yyyy}" : "never expires")@(c.AllowedCidrs is null ? "" : " · network-restricted")</div>
+                                </td>
+                                <td data-label="Key age" title="Current key issued @c.KeyCreatedUtc.ToString("u")">
+                                    <span class="pill @(IsOldKey(c.KeyCreatedUtc) ? "pill-warning" : "pill-muted")">@Age(c.KeyCreatedUtc)</span>
+                                    <div class="cell-sub">issued @c.KeyCreatedUtc.ToString("d MMM yyyy")</div>
+                                    @if (IsOldKey(c.KeyCreatedUtc)){<div class="cell-sub">consider issuing a new key</div>}
+                                </td>
+                                <td data-label="Last used" title="@c.LastUsedUtc?.ToString("u")">@Ago(c.LastUsedUtc)</td>
+                                <td class="td-actions text-end">
+                                    @if (Access.CanEdit(env.Id))
+                                    {
+                                        <div class="d-inline-flex gap-1">
+                                            <button class="btn btn-sm btn-ghost" title="Change what it can read" @onclick="() => Edit(c)"><i class="i i-edit"></i> <span class="d-none d-xxl-inline">Edit</span></button>
+                                            <button class="btn btn-sm btn-ghost" title="Issue a new key (the old one stops working)" @onclick="() => Ask(c, Pending.Rotate)"><i class="i i-refresh"></i></button>
+                                            <button class="btn btn-sm btn-ghost" title="@(c.Disabled ? "Turn back on" : "Turn off temporarily")" @onclick="() => Ask(c, Pending.Toggle)"><i class="i @(c.Disabled ? "i-check" : "i-x")"></i></button>
+                                            <button class="btn btn-sm btn-ghost text-danger" title="Delete" @onclick="() => Ask(c, Pending.Delete)"><i class="i i-trash"></i></button>
+                                        </div>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+}
+
+<Modal Show="editing is not null" Title="@(editingId is null ? $"Add an application to {env?.Name}" : $"Edit {editing?.Name}")" Large="true" OnClose="() => editing = null">
+    <ChildContent>
+        @if (editing is not null)
+        {
+            <div class="row g-3">
+                <div class="col-md-7">
+                    <label class="form-label" for="cname">Application name <span class="req">*</span></label>
+                    <input id="cname" class="form-control" @bind="editing.Name" @bind:event="oninput" disabled="@(editingId is not null)" placeholder="e.g. Billing service" />
+                    <div class="form-text">The program or system that will read the secrets.</div>
+                </div>
+                <div class="col-md-5">
+                    <label class="form-label" for="cexp">Key expires <span class="opt">optional</span></label>
+                    <input id="cexp" type="date" class="form-control" @bind="expires" />
+                    <div class="d-flex gap-2 mt-1">
+                        <button type="button" class="btn btn-sm @(expires is null ? "btn-primary" : "btn-outline-secondary")" @onclick="() => expires = null">Never</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => expires = DateOnly.FromDateTime(DateTime.UtcNow.AddYears(1))">In 1 year</button>
+                    </div>
+                    <div class="form-text">@(expires is null ? "Never expires unless you set a date." : $"Stops working on {expires:d MMM yyyy}.")</div>
+                </div>
+                <div class="col-12">
+                    <label class="form-label" for="cdesc">Owner / contact <span class="opt">recommended</span></label>
+                    <input id="cdesc" class="form-control" @bind="editing.Description" placeholder="e.g. Payments team, jane.doe@corp.com" />
+                </div>
+                <div class="col-12">
+                    <label class="form-label">Which secrets can it read? <span class="req">*</span></label>
+                    <GrantPicker Options="grantOptions" Selected="selectedGrants" EnvName="@(env?.Name ?? "")" OnChanged="StateHasChanged" />
+                </div>
+                <div class="col-12">
+                    <details class="advanced">
+                        <summary><i class="i i-chevron-right"></i> Advanced: restrict by network <span class="text-muted fw-normal">(only if your security team asks)</span></summary>
+                        <div class="pt-3">
+                            <label class="form-label" for="ccidr">Only allow requests from these networks</label>
+                            <input id="ccidr" class="form-control mono-input" @bind="editing.AllowedCidrs" placeholder="e.g. 10.20.0.0/16, 10.30.4.12/32" />
+                            <div class="form-text">Comma-separated address ranges (CIDR). Leave empty to allow any network.</div>
+                        </div>
+                    </details>
+                </div>
+                @if (env is { Protected: true })
+                {
+                    <div class="col-12">
+                        <label class="form-label" for="creason">Reason <span class="req">*</span></label>
+                        <input id="creason" class="form-control" @bind="editing.Reason" @bind:event="oninput" placeholder="e.g. CHG-1234" />
+                        <div class="form-text">@env.Name is protected, so changes need a reason (for example a change ticket).</div>
+                    </div>
+                }
+            </div>
+        }
+    </ChildContent>
+    <Footer>
+        @if (editing is not null && ClientMissing().Count > 0)
+        {
+            <span class="still-needed me-auto"><i class="i i-info"></i> Still needed: @string.Join(", ", ClientMissing())</span>
+        }
+        <button class="btn btn-outline-secondary" @onclick="() => editing = null">Cancel</button>
+        <button class="btn btn-primary" disabled="@(Busy || ClientMissing().Count > 0)" @onclick="SaveAsync"><i class="i i-check"></i> @(editingId is null ? "Add and create key" : "Save")</button>
+    </Footer>
+</Modal>
+
+<Modal Show="issuedKey is not null" Title="Hand this to the application's owner" Large="true" OnClose="CloseIssued">
+    <ChildContent>
+        <div class="once-box mb-3">
+            <div class="d-flex gap-2 align-items-start"><i class="i i-alert text-warning mt-1"></i>
+                <div><strong>Copy the key now: this is the only time it's shown.</strong> Send it privately, for example through your password manager's sharing feature, never by email or chat. If it gets lost, use <em>Issue a new key</em>.</div>
+            </div>
+        </div>
+        <SecretValue Label="@($"Key for {issuedFor} ({env?.Name})")" Value="@(issuedKey ?? "")" OnCopy="CopyKeyAsync" />
+
+        <div class="form-label mt-4 mb-1">Setup instructions for the developer <span class="opt">don't contain the key; safe to email</span></div>
+        <div class="handover">@Instructions()</div>
+        <button class="btn btn-outline-secondary mt-2" @onclick="CopyInstructionsAsync"><i class="i i-copy"></i> Copy instructions</button>
+    </ChildContent>
+    <Footer><button class="btn btn-primary" @onclick="CloseIssued">Done: I've saved the key</button></Footer>
+</Modal>
+
+<ConfirmDialog Show="pending == Pending.Rotate" Title="Issue a new key?" ConfirmText="Issue new key" AskReason="true" Env="env"
+               Message="@($"{target?.Name} gets a new key and the current key stops working immediately. Only do this if the key was lost or exposed, and make sure the owner can update the application.")" OnConfirm="RotateAsync" OnCancel="() => pending = Pending.None" />
+<ConfirmDialog Show="pending == Pending.Toggle" Title="@(target?.Disabled == true ? "Turn back on?" : "Turn off temporarily?")" ConfirmText="@(target?.Disabled == true ? "Turn on" : "Turn off")" AskReason="true" Env="env" Danger="@(target?.Disabled != true)"
+               Message="@(target?.Disabled == true ? $"{target?.Name} will be able to read its secrets again." : $"{target?.Name} won't be able to read any secrets until it's turned back on. Its key stays the same.")" OnConfirm="ToggleAsync" OnCancel="() => pending = Pending.None" />
+<ConfirmDialog Show="pending == Pending.Delete" Title="Delete this application?" ConfirmText="Delete" Danger="true" AskReason="true" Env="env"
+               Message="@($"{target?.Name} will stop working straight away and its key can't be recovered.")" OnConfirm="DeleteAsync" OnCancel="() => pending = Pending.None" />
+
+<ToastHost Items="Toasts" />
+
+@code {
+    [Parameter] public string? EnvName { get; set; }
+
+    /// <summary>Opening /clients/{env}?grant=name starts a new application with that secret pre-selected.</summary>
+    [SupplyParameterFromQuery] public string? Grant { get; set; }
+
+    private enum Pending { None, Rotate, Toggle, Delete }
+    private List<EnvironmentInfo> visible = [];
+    private EnvironmentInfo? env;
+    private List<Keyport.Server.Data.ApiClient>? items;
+    private SaveApiClientRequest? editing;
+    private int? editingId;
+    private DateOnly? expires;
+    private string? issuedKey, issuedFor;
+    private List<string> issuedGrants = [];
+    private Keyport.Server.Data.ApiClient? target;
+    private Pending pending;
+    private List<GrantOption> grantOptions = [];
+    private HashSet<string> selectedGrants = [];
+    private bool grantHandled;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        visible = Environments.All.Where(e => Access.CanView(e.Id)).ToList();
+        env = Environments.ByName(EnvName) is { } e && Access.CanView(e.Id) ? e : visible.FirstOrDefault();
+        await LoadAsync();
+        if (!grantHandled && !string.IsNullOrWhiteSpace(Grant) && env is not null && Access.CanEdit(env.Id))
+        {
+            grantHandled = true;
+            await NewClient(Grant);
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        items = env is null ? [] : await ClientService.ListAsync(Access, env.Id);
+    }
+
+    private List<string> ClientMissing()
+    {
+        var m = new List<string>();
+        if (editing is null) return m;
+        if (string.IsNullOrWhiteSpace(editing.Name)) m.Add("a name");
+        if (selectedGrants.Count == 0) m.Add("at least one secret");
+        if (env is { Protected: true } && string.IsNullOrWhiteSpace(editing.Reason)) m.Add("a reason");
+        return m;
+    }
+
+    private string GrantTitle(string pattern)
+    {
+        var n = grantOptions.FirstOrDefault(o => o.Pattern == pattern)?.SecretCount;
+        return pattern == "*" ? "All secrets in this environment, including future ones" :
+            pattern.EndsWith("/*") ? $"Everything in the {pattern[..^2]} folder" : "This one secret";
+    }
+
+    private async Task NewClient(string? preselect)
+    {
+        if (env is null) return;
+        editingId = null;
+        expires = null; // keys never expire unless a date is chosen
+        grantOptions = await ClientService.GrantOptionsAsync(Access, env.Id);
+        selectedGrants = preselect is not null && grantOptions.Any(o => o.Pattern == preselect) ? [preselect] : [];
+        editing = new SaveApiClientRequest();
+    }
+
+    private async Task Edit(Keyport.Server.Data.ApiClient c)
+    {
+        editingId = c.Id;
+        grantOptions = await ClientService.GrantOptionsAsync(Access, env!.Id);
+        selectedGrants = c.Grants.Select(g => g.Pattern).ToHashSet();
+        expires = c.ExpiresUtc is { } x ? DateOnly.FromDateTime(x) : null;
+        editing = new SaveApiClientRequest { Name = c.Name, Description = c.Description, AllowedCidrs = c.AllowedCidrs };
+    }
+
+    private void Ask(Keyport.Server.Data.ApiClient c, Pending p)
+    {
+        target = c;
+        pending = p;
+    }
+
+    private async Task SaveAsync()
+    {
+        if (editing is null || env is null || ClientMissing().Count > 0) return;
+        editing.ExpiresUtc = expires?.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+        editing.Grants = string.Join('\n', selectedGrants.Order());
+        if (editingId is null)
+        {
+            string? key = null;
+            var name = SecretNames.Slugify(editing.Name);
+            editing.Name = name.Length > 0 ? name : editing.Name;
+            if (await RunAsync("client.create", async () => key = (await ClientService.CreateAsync(Access, env.Id, editing, Ip)).Key, null, editing.Name, env.Name))
+            {
+                issuedFor = editing.Name;
+                issuedGrants = selectedGrants.Order().ToList();
+                issuedKey = key;
+                editing = null;
+                await LoadAsync();
+            }
+        }
+        else if (await RunAsync("client.update", () => ClientService.UpdateAsync(Access, editingId.Value, editing, Ip), "Saved", editing.Name, env.Name))
+        {
+            editing = null;
+            await LoadAsync();
+        }
+    }
+
+    private void CloseIssued()
+    {
+        issuedKey = null;
+        if (!string.IsNullOrEmpty(Grant)) Nav.NavigateTo($"clients/{env!.Name.ToLowerInvariant()}", replace: true);
+    }
+
+    /// <summary>Plain-text hand-over for the developer: where to call, what to request, how to trust TLS. Never includes the key.</summary>
+    private string Instructions()
+    {
+        if (env is null) return "";
+        var host = Nav.ToAbsoluteUri("/").Host;
+        var baseUrl = $"https://{host}:{env.Port}/api/v1";
+        var secrets = grantOptions.Where(o => o.Kind == GrantKind.Secret && issuedGrants.Any(g => SecretNames.MatchesGrant(o.Pattern, g))).ToList();
+        var lines = new List<string>
+        {
+            $"Keyport access for: {issuedFor} ({env.Name})",
+            "",
+            $"Address:  {baseUrl}",
+            "Key:      sent to you separately. Send it in the header  Authorization: Bearer <key>",
+            "",
+            "Secrets you can read:",
+        };
+        foreach (var s in secrets)
+        {
+            var kind = s.Type!.Value.IsConnection() ? "connections" : s.Type.Value.IsCredential() ? "credentials" : "secrets";
+            lines.Add($"  GET {baseUrl}/{kind}/{s.Pattern}");
+        }
+        if (issuedGrants.Any(g => g.EndsWith('*')))
+            lines.Add($"  (plus anything added later under: {string.Join(", ", issuedGrants.Where(g => g.EndsWith('*')))})");
+        lines.AddRange([
+            "",
+            $"This key only works on port {env.Port} ({env.Name}). Other environments need their own key.",
+            $"Trust our certificate authority: http://{host}:{Environments.HttpPort}/ca.crt",
+            "Example:",
+            $"  curl --cacert ca.crt -H \"Authorization: Bearer $KEYPORT_API_KEY\" {baseUrl}/{(secrets.FirstOrDefault() is { } f ? (f.Type!.Value.IsConnection() ? "connections" : f.Type.Value.IsCredential() ? "credentials" : "secrets") + "/" + f.Pattern : "secrets")}",
+        ]);
+        return string.Join('\n', lines);
+    }
+
+    private async Task RotateAsync(string? reason)
+    {
+        pending = Pending.None;
+        string? key = null;
+        if (await RunAsync("client.rotate-key", async () => key = await ClientService.RotateKeyAsync(Access, target!.Id, reason, Ip), null, target?.Name, env?.Name))
+        {
+            grantOptions = await ClientService.GrantOptionsAsync(Access, env!.Id);
+            issuedFor = target!.Name;
+            issuedGrants = target.Grants.Select(g => g.Pattern).ToList();
+            issuedKey = key;
+            await LoadAsync();
+        }
+    }
+
+    private async Task ToggleAsync(string? reason)
+    {
+        pending = Pending.None;
+        if (await RunAsync(target!.Disabled ? "client.enable" : "client.disable", () => ClientService.SetDisabledAsync(Access, target.Id, !target.Disabled, reason, Ip),
+                target.Disabled ? "Turned back on" : "Turned off", target.Name, env?.Name))
+            await LoadAsync();
+    }
+
+    private async Task DeleteAsync(string? reason)
+    {
+        pending = Pending.None;
+        if (await RunAsync("client.delete", () => ClientService.DeleteAsync(Access, target!.Id, reason, Ip), "Application deleted", target?.Name, env?.Name))
+            await LoadAsync();
+    }
+
+    private async Task CopyKeyAsync((string Label, string Value) item)
+    {
+        var ok = await JS.InvokeAsync<bool>("sm.copy", item.Value);
+        LogAction("client.copy-key", issuedFor, env?.Name);
+        Toast(ok ? "Key copied" : "Copy failed: select the key and copy it manually", error: !ok);
+    }
+
+    private async Task CopyInstructionsAsync()
+    {
+        var ok = await JS.InvokeAsync<bool>("sm.copy", Instructions());
+        LogAction("client.copy-instructions", issuedFor, env?.Name);
+        Toast(ok ? "Instructions copied" : "Copy failed", error: !ok);
+    }
+}

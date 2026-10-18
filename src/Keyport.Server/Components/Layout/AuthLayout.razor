@@ -1,0 +1,26 @@
+@inherits LayoutComponentBase
+
+<div class="auth-shell">
+    <div class="auth-art" aria-hidden="true">
+        <div class="auth-art-inner">
+            <img class="brand-mark brand-mark-lg brand-logo" src="img/logo-mark.svg" alt="" />
+            <h2>Keyport</h2>
+            <p>Mission control for connection strings and credentials. Every environment in its own orbit: encrypted, segmented by port and fully audited.</p>
+            <div class="auth-tagline">Dev · Test · Upgrade · Prod</div>
+            <ul class="auth-points">
+                <li><i class="i i-lock"></i> AES-256-GCM envelope encryption</li>
+                <li><i class="i i-layers"></i> One port per environment, nothing crosses over</li>
+                <li><i class="i i-activity"></i> Tamper-evident audit trail</li>
+            </ul>
+        </div>
+    </div>
+    <div class="auth-panel">
+        <div class="auth-card">
+            <div class="auth-brand d-lg-none"><img class="brand-mark brand-logo" src="img/logo-mark.svg" alt="" /> Keyport</div>
+            @Body
+        </div>
+        <button type="button" class="icon-btn auth-theme" data-theme-toggle title="Toggle theme" aria-label="Toggle theme">
+            <i class="i i-moon theme-dark-hide"></i><i class="i i-sun theme-light-hide"></i>
+        </button>
+    </div>
+</div>

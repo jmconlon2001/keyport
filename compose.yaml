@@ -1,19 +1,19 @@
-# SecretManager: local / single-host deployment.
+# Keyport: local / single-host deployment.
 #   Podman:  podman compose up -d --build
 #   Docker:  docker compose up -d --build
 #
 # Before first start, create the master key (keep a secure backup: without it nothing can be decrypted):
-#   mkdir -p secrets && openssl rand -base64 32 > secrets/sm_master_key && chmod 600 secrets/sm_master_key
+#   mkdir -p secrets && openssl rand -base64 32 > secrets/keyport_master_key && chmod 600 secrets/keyport_master_key
 
-name: secretmanager
+name: keyport
 
 services:
-  secretmanager:
+  keyport:
     build:
       context: .
       dockerfile: Dockerfile
-    image: localhost/secretmanager:latest
-    container_name: secretmanager
+    image: localhost/keyport:latest
+    container_name: keyport
     restart: unless-stopped
     init: true          # proper PID 1 (signal handling, zombie reaping)
     ports:
@@ -25,17 +25,17 @@ services:
       - "9446:9446"   # Prod API
     environment:
       # Names/IPs clients use to reach the service; they go into the TLS certificate.
-      SecretManager__Edge__HostNames__0: "localhost"
-      SecretManager__Edge__HostNames__1: "secretmanager"
-      SecretManager__Edge__IpAddresses__0: "127.0.0.1"
+      Keyport__Edge__HostNames__0: "localhost"
+      Keyport__Edge__HostNames__1: "keyport"
+      Keyport__Edge__IpAddresses__0: "127.0.0.1"
       # Log retention (days, 0 = forever)
-      SecretManager__Logs__ApiLogRetentionDays: "90"
-      SecretManager__Logs__UiLogRetentionDays: "90"
-      SecretManager__Logs__AuditRetentionDays: "0"
+      Keyport__Logs__ApiLogRetentionDays: "90"
+      Keyport__Logs__UiLogRetentionDays: "90"
+      Keyport__Logs__AuditRetentionDays: "0"
     secrets:
-      - sm_master_key
+      - keyport_master_key
     volumes:
-      - sm-data:/data
+      - keyport-data:/data
     read_only: true
     tmpfs:
       - /tmp
@@ -44,15 +44,16 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "dotnet", "SecretManager.Server.dll", "--healthcheck"]
+      test: ["CMD", "dotnet", "Keyport.Server.dll", "--healthcheck"]
       interval: 30s
       timeout: 5s
       start_period: 20s
       retries: 3
 
 secrets:
-  sm_master_key:
-    file: ./secrets/sm_master_key
+  keyport_master_key:
+    file: ./secrets/keyport_master_key
 
 volumes:
-  sm-data:
+  keyport-data:
+    name: keyport-data

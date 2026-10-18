@@ -1,0 +1,261 @@
+@page "/users"
+@attribute [Authorize(Roles = Keyport.Server.Data.Roles.Admin)]
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@inherits AppPageBase
+@using Keyport.Server.Data
+@inject UserAdminService UserAdmin
+@inject IJSRuntime JS
+
+<PageTitle>Users &amp; access · Keyport</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>Users &amp; access</h1>
+        <p class="page-subtitle">Who can sign in, and what they can do in each environment. Everyone must set up two-step sign-in (an authenticator app or passkey).</p>
+    </div>
+    <div class="page-actions"><button class="btn btn-primary" @onclick="NewUser"><i class="i i-plus"></i> New user</button></div>
+</div>
+
+<div class="card card-flush">
+    @if (users is null)
+    {
+        <div class="empty"><div class="spinner-border spinner-border-sm"></div></div>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="table table-cards">
+                <thead>
+                    <tr>
+                        <th>User</th><th>Roles</th>
+                        @foreach (var e in Environments.All)
+                        {
+                            <th class="text-center"><span class="env-badge" style="--env:@e.Color">@e.Name</span></th>
+                        }
+                        <th>Security</th><th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var u in users)
+                    {
+                        <tr>
+                            <td class="td-primary">
+                                <div class="d-flex align-items-center gap-2">
+                                    <span class="avatar avatar-sm">@u.UserName[..1].ToUpperInvariant()</span>
+                                    <div><div class="cell-main">@u.UserName @if (u.IsSelf(Access)){<span class="pill pill-muted ms-1">you</span>}</div><div class="cell-sub">@(u.DisplayName ?? $"since {u.CreatedUtc:yyyy-MM-dd}")</div></div>
+                                </div>
+                            </td>
+                            <td data-label="Roles">
+                                @if (u.IsAdmin){<span class="pill pill-accent me-1">Admin</span>}
+                                @if (u.IsAuditor){<span class="pill pill-info me-1">Auditor</span>}
+                                @if (!u.IsAdmin && !u.IsAuditor){<span class="text-muted">—</span>}
+                            </td>
+                            @foreach (var e in Environments.All)
+                            {
+                                <td data-label="@e.Name" class="text-md-center">
+                                    @if (u.IsAdmin){<span class="cell-sub">all</span>}
+                                    else if (u.EnvRoles.TryGetValue(e.Id, out var r)){<span class="pill @(r == EnvironmentRole.Editor ? "pill-success" : "pill-muted")">@r</span>}
+                                    else {<span class="text-muted">—</span>}
+                                </td>
+                            }
+                            <td data-label="Security">
+                                <div class="d-flex flex-wrap gap-1 justify-content-end justify-content-md-start">
+                                    @if (u.Disabled){<span class="pill pill-danger">disabled</span>}
+                                    @if (u.LockedOut){<span class="pill pill-warning">locked</span>}
+                                    @if (u.MfaEnabled || u.Passkeys > 0){<span class="pill pill-success"><i class="i i-shield"></i> MFA</span>} else {<span class="pill pill-warning">no MFA yet</span>}
+                                    @if (u.MustChangePassword){<span class="pill pill-muted">temp password</span>}
+                                </div>
+                            </td>
+                            <td class="td-actions text-end">
+                                <div class="d-inline-flex gap-1">
+                                    <button class="btn btn-sm btn-ghost" title="Edit access" @onclick="() => Edit(u)"><i class="i i-edit"></i></button>
+                                    <button class="btn btn-sm btn-ghost" title="Reset password" @onclick="() => Ask(u, Pending.ResetPassword)"><i class="i i-key"></i></button>
+                                    <button class="btn btn-sm btn-ghost" title="Reset MFA" @onclick="() => Ask(u, Pending.ResetMfa)"><i class="i i-shield"></i></button>
+                                    @if (u.LockedOut)
+                                    {
+                                        <button class="btn btn-sm btn-ghost" title="Unlock" @onclick="() => Ask(u, Pending.Unlock)"><i class="i i-lock"></i></button>
+                                    }
+                                    @if (!u.IsSelf(Access))
+                                    {
+                                        <button class="btn btn-sm btn-ghost" title="@(u.Disabled ? "Enable" : "Disable")" @onclick="() => Ask(u, Pending.Toggle)"><i class="i @(u.Disabled ? "i-check" : "i-x")"></i></button>
+                                        <button class="btn btn-sm btn-ghost text-danger" title="Delete" @onclick="() => Ask(u, Pending.Delete)"><i class="i i-trash"></i></button>
+                                    }
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</div>
+
+<Modal Show="editing is not null" Title="@(editingId is null ? "New user" : $"Access for {editing?.UserName}")" Large="true" OnClose="() => editing = null">
+    <ChildContent>
+        @if (editing is not null)
+        {
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <label class="form-label" for="uname">Username</label>
+                    <input id="uname" class="form-control" @bind="editing.UserName" disabled="@(editingId is not null)" placeholder="jane.doe" autocomplete="off" />
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label" for="udisp">Display name</label>
+                    <input id="udisp" class="form-control" @bind="editing.DisplayName" placeholder="Jane Doe" />
+                </div>
+                <div class="col-12">
+                    <div class="form-section-title mt-2">Global roles</div>
+                    <div class="d-flex gap-4 flex-wrap">
+                        <div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="radm" @bind="editing.IsAdmin" /><label class="form-check-label" for="radm"><strong>Admin</strong>: everything, every environment</label></div>
+                        <div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="raud" @bind="editing.IsAuditor" /><label class="form-check-label" for="raud"><strong>Auditor</strong>: read audit and activity logs</label></div>
+                    </div>
+                </div>
+                @if (!editing.IsAdmin)
+                {
+                    <div class="col-12">
+                        <div class="form-section-title mt-2">Environment access</div>
+                        <p class="form-hint mt-1"><strong>Viewer</strong> can see secrets and show passwords. <strong>Editor</strong> can also add and change secrets and applications. <strong>None</strong> hides the environment completely.</p>
+                        <div class="vstack gap-2">
+                            @foreach (var e in Environments.All)
+                            {
+                                var current = editing.EnvRoles.GetValueOrDefault(e.Id);
+                                <div class="d-flex align-items-center justify-content-between gap-3 flex-wrap p-2 rounded-3" style="border:1px solid var(--sm-border)">
+                                    <span class="d-flex align-items-center gap-2 fw-semibold"><span class="env-dot" style="--env:@e.Color"></span>@e.Name @if (e.Protected){<i class="i i-lock text-muted"></i>}</span>
+                                    <div class="segmented">
+                                        <button type="button" class="@(current is null ? "active" : "")" @onclick="() => editing.EnvRoles[e.Id] = null">None</button>
+                                        <button type="button" class="@(current == EnvironmentRole.Viewer ? "active" : "")" @onclick="() => editing.EnvRoles[e.Id] = EnvironmentRole.Viewer">Viewer</button>
+                                        <button type="button" class="@(current == EnvironmentRole.Editor ? "active" : "")" @onclick="() => editing.EnvRoles[e.Id] = EnvironmentRole.Editor">Editor</button>
+                                    </div>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+    </ChildContent>
+    <Footer>
+        <button class="btn btn-outline-secondary" @onclick="() => editing = null">Cancel</button>
+        <button class="btn btn-primary" disabled="@Busy" @onclick="SaveAsync"><i class="i i-check"></i> @(editingId is null ? "Create user" : "Save access")</button>
+    </Footer>
+</Modal>
+
+<Modal Show="tempPassword is not null" Title="Temporary password" OnClose="() => tempPassword = null">
+    <ChildContent>
+        <div class="once-box mb-3">Give this to <strong>@tempFor</strong> through a secure channel. It is shown once. They must change it and enrol MFA at first sign-in.</div>
+        <SecretValue Label="Temporary password" Value="@(tempPassword ?? "")" OnCopy="CopyAsync" />
+    </ChildContent>
+    <Footer><button class="btn btn-primary" @onclick="() => tempPassword = null">Done</button></Footer>
+</Modal>
+
+<ConfirmDialog Show="pending == Pending.ResetPassword" Title="Reset password" ConfirmText="Reset password" Message="@($"Generate a new temporary password for {target?.UserName}? Their current password stops working.")" OnConfirm="ResetPasswordAsync" OnCancel="() => pending = Pending.None" />
+<ConfirmDialog Show="pending == Pending.ResetMfa" Title="Reset MFA" ConfirmText="Reset MFA" Danger="true" Message="@($"Remove {target?.UserName}'s authenticator and passkeys? They must enrol again at next sign-in.")" OnConfirm="ResetMfaAsync" OnCancel="() => pending = Pending.None" />
+<ConfirmDialog Show="pending == Pending.Unlock" Title="Unlock account" ConfirmText="Unlock" Message="@($"Clear the lockout for {target?.UserName}?")" OnConfirm="UnlockAsync" OnCancel="() => pending = Pending.None" />
+<ConfirmDialog Show="pending == Pending.Toggle" Title="@(target?.Disabled == true ? "Enable user" : "Disable user")" ConfirmText="@(target?.Disabled == true ? "Enable" : "Disable")" Danger="@(target?.Disabled != true)" Message="@($"{(target?.Disabled == true ? "Re-enable" : "Disable")} {target?.UserName}? Active sessions end within a minute.")" OnConfirm="ToggleAsync" OnCancel="() => pending = Pending.None" />
+<ConfirmDialog Show="pending == Pending.Delete" Title="Delete user" ConfirmText="Delete" Danger="true" Message="@($"Permanently delete {target?.UserName}? Their audit history is kept.")" OnConfirm="DeleteAsync" OnCancel="() => pending = Pending.None" />
+
+<ToastHost Items="Toasts" />
+
+@code {
+    private enum Pending { None, ResetPassword, ResetMfa, Unlock, Toggle, Delete }
+    private List<UserRow>? users;
+    private SaveUserRequest? editing;
+    private string? editingId;
+    private UserRow? target;
+    private Pending pending;
+    private string? tempPassword, tempFor;
+
+    protected override async Task OnPageInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync() => users = await UserAdmin.ListAsync(Access);
+
+    private void NewUser()
+    {
+        editingId = null;
+        editing = new SaveUserRequest();
+    }
+
+    private void Edit(UserRow u)
+    {
+        editingId = u.Id;
+        editing = new SaveUserRequest
+        {
+            UserName = u.UserName,
+            DisplayName = u.DisplayName,
+            IsAdmin = u.IsAdmin,
+            IsAuditor = u.IsAuditor,
+            EnvRoles = u.EnvRoles.ToDictionary(kv => kv.Key, kv => (EnvironmentRole?)kv.Value),
+        };
+    }
+
+    private void Ask(UserRow u, Pending p)
+    {
+        target = u;
+        pending = p;
+    }
+
+    private async Task SaveAsync()
+    {
+        if (editing is null) return;
+        if (editingId is null)
+        {
+            string? pw = null;
+            if (await RunAsync("user.create", async () => pw = await UserAdmin.CreateAsync(Access, editing, Ip), null, editing.UserName))
+            {
+                tempFor = editing.UserName.ToLowerInvariant();
+                tempPassword = pw;
+                editing = null;
+                await LoadAsync();
+            }
+        }
+        else if (await RunAsync("user.update-access", () => UserAdmin.UpdateAsync(Access, editingId, editing, Ip), "Access updated", editing.UserName))
+        {
+            editing = null;
+            await LoadAsync();
+        }
+    }
+
+    private async Task ResetPasswordAsync(string? _)
+    {
+        pending = Pending.None;
+        string? pw = null;
+        if (await RunAsync("user.reset-password", async () => pw = await UserAdmin.ResetPasswordAsync(Access, target!.Id, Ip), null, target?.UserName))
+        {
+            tempFor = target!.UserName;
+            tempPassword = pw;
+            await LoadAsync();
+        }
+    }
+
+    private async Task ResetMfaAsync(string? _)
+    {
+        pending = Pending.None;
+        if (await RunAsync("user.reset-mfa", () => UserAdmin.ResetMfaAsync(Access, target!.Id, Ip), "MFA reset", target?.UserName)) await LoadAsync();
+    }
+
+    private async Task UnlockAsync(string? _)
+    {
+        pending = Pending.None;
+        if (await RunAsync("user.unlock", () => UserAdmin.UnlockAsync(Access, target!.Id, Ip), "Account unlocked", target?.UserName)) await LoadAsync();
+    }
+
+    private async Task ToggleAsync(string? _)
+    {
+        pending = Pending.None;
+        if (await RunAsync(target!.Disabled ? "user.enable" : "user.disable", () => UserAdmin.SetDisabledAsync(Access, target.Id, !target.Disabled, Ip),
+                target.Disabled ? "User enabled" : "User disabled", target.UserName)) await LoadAsync();
+    }
+
+    private async Task DeleteAsync(string? _)
+    {
+        pending = Pending.None;
+        if (await RunAsync("user.delete", () => UserAdmin.DeleteAsync(Access, target!.Id, Ip), "User deleted", target?.UserName)) await LoadAsync();
+    }
+
+    private async Task CopyAsync((string Label, string Value) item)
+    {
+        var ok = await JS.InvokeAsync<bool>("sm.copy", item.Value);
+        LogAction("user.copy-temp-password", tempFor);
+        Toast(ok ? "Copied" : "Copy failed", error: !ok);
+    }
+}

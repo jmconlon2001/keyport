@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <!-- Keyport app icon: mark on a deep-space tile (favicon, sidebar, sign-in) -->
+  <defs>
+    <radialGradient id="kp-bg" cx="70%" cy="20%" r="95%">
+      <stop offset="0%" stop-color="#16203a" />
+      <stop offset="60%" stop-color="#0c1122" />
+      <stop offset="100%" stop-color="#080c18" />
+    </radialGradient>
+    <linearGradient id="kp-card" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#d4e0ec" />
+      <stop offset="100%" stop-color="#bccddf" />
+    </linearGradient>
+  </defs>
+  <rect width="120" height="120" rx="26" fill="url(#kp-bg)" />
+  <circle cx="96" cy="20" r="1.4" fill="#ffffff" opacity=".8" />
+  <circle cx="22" cy="98" r="0.9" fill="#ffffff" opacity=".5" />
+  <g transform="translate(60 60) scale(.82) translate(-60 -60)">
+    <circle cx="60" cy="60" r="53.1" fill="none" stroke="#2a5d7b" stroke-width="6.2" />
+    <circle cx="60" cy="60" r="36.9" fill="none" stroke="#b07cf0" stroke-width="9" />
+    <rect x="45.35" y="54.7" width="29.3" height="15" rx="1.5" fill="url(#kp-card)" transform="rotate(44 60 62.2)" />
+  </g>
+</svg>

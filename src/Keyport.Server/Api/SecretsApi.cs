@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Keyport.Core.Secrets;
+using Keyport.Core.Secrets.Types;
 using Keyport.Server.Edge;
 using Keyport.Server.Services;
 
@@ -8,7 +9,12 @@ namespace Keyport.Server.Api;
 public sealed record ConnectionComponents(string? Host, int? Port, string? Database, string? ServiceName, string? Sid, string? Username, string? Password);
 public sealed record ConnectionResponse(string Name, string Environment, SecretType Type, string ConnectionString, ConnectionComponents Components, int Version);
 public sealed record CredentialResponse(string Name, string Environment, SecretType Type, string? Username, string? Password, string? Domain, string? Url, int Version);
-public sealed record SecretResponse(string Name, string Environment, SecretType Type, string? Value, string? Username, string? Password, string? ConnectionString, int Version);
+/// <summary>
+/// Any secret. The first fields keep the original shape; <c>Fields</c> has every field of the type and
+/// <c>Outputs</c> everything built from them (connection string, URL, PEM bundle, credentials file, …).
+/// </summary>
+public sealed record SecretResponse(string Name, string Environment, SecretType Type, string? Value, string? Username, string? Password, string? ConnectionString, int Version,
+    IReadOnlyDictionary<string, string?> Fields, IReadOnlyDictionary<string, string> Outputs);
 public sealed record SecretListResponse(string Environment, IReadOnlyList<string> Names);
 public sealed record ClientStatusResponse(
     string Environment, int Port, string Service, string Version, string Health, DateTime ServerTimeUtc,
@@ -57,7 +63,7 @@ public static class SecretsApi
 
     private static async Task<IResult> GetCredential(string name, HttpContext ctx, SecretService secrets, AuditService audit)
     {
-        var (resolved, error) = await ResolveAsync(name, ctx, secrets, audit, "api.read-credential", t => t.IsCredential() || t.IsConnection());
+        var (resolved, error) = await ResolveAsync(name, ctx, secrets, audit, "api.read-credential", t => t.Definition.HasUsernameAndPassword);
         if (error is not null) return error;
         var s = resolved!;
         return Results.Ok(new CredentialResponse(s.Name, Env(ctx), s.Type, s.Payload.Username, s.Payload.Password, s.Metadata.Domain, s.Metadata.Url, s.Version));
@@ -68,8 +74,11 @@ public static class SecretsApi
         var (resolved, error) = await ResolveAsync(name, ctx, secrets, audit, "api.read-secret", _ => true);
         if (error is not null) return error;
         var s = resolved!;
-        var cs = s.Type.IsConnection() ? ConnectionStringFactory.Build(s.Type, s.Metadata, s.Payload) : null;
-        return Results.Ok(new SecretResponse(s.Name, Env(ctx), s.Type, s.Payload.Value, s.Payload.Username, s.Payload.Password, cs, s.Version));
+        var def = s.Type.Definition;
+        var fields = SecretFields.Merge(s.Metadata, s.Payload);
+        var outputs = def.IsUnknown ? new Dictionary<string, string>() : SecretTypeRegistry.Current.RenderAll(def, fields);
+        return Results.Ok(new SecretResponse(s.Name, Env(ctx), s.Type, s.Payload.Value, s.Payload.Username, s.Payload.Password,
+            outputs.GetValueOrDefault(OutputKeys.ConnectionString), s.Version, fields, outputs));
     }
 
     private static async Task<IResult> ListSecrets(string? prefix, HttpContext ctx, SecretService secrets)
@@ -132,7 +141,7 @@ public static class SecretsApi
 }
 
 /// <summary>Authenticates <c>Authorization: Bearer sm_…</c> (or <c>X-Api-Key</c>) against the port's environment.</summary>
-public sealed class ApiKeyFilter(ApiClientService clients, AuditService audit) : IEndpointFilter
+public sealed class ApiKeyFilter(ApiClientService clients, AuditService audit, FailedAuthThrottle throttle) : IEndpointFilter
 {
     public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
     {
@@ -140,16 +149,30 @@ public sealed class ApiKeyFilter(ApiClientService clients, AuditService audit) :
         var env = ctx.Listener().Environment;
         if (env is null) return Results.NotFound();
 
+        // An IP that keeps failing is refused before any key lookup or audit write.
+        if (throttle.IsBlocked(ctx.ClientIp()))
+        {
+            ctx.Items["sm.error"] = "too many failed authentications";
+            return Results.Json(new ApiError("Too many failed attempts. Try again in a minute."), statusCode: StatusCodes.Status429TooManyRequests);
+        }
+
         var key = ReadKey(ctx.Request);
         if (key is null)
+        {
+            throttle.RecordFailure(ctx.ClientIp(), "missing API key");
             return Unauthorized(ctx, "missing API key");
+        }
 
         var result = await clients.AuthenticateAsync(key, env, ctx.Connection.RemoteIpAddress, ctx.RequestAborted);
         if (result.Failure is not null)
         {
             ctx.Items["sm.error"] = result.Failure;
-            await audit.WriteAsync(result.Client is null ? "client:unknown" : $"client:{result.Client.Name}", "api.authenticate", AuditResult.Denied,
-                env.Name, ctx.Request.Path, ctx.ClientIp(), result.Failure, ctx.RequestAborted);
+            var actor = result.Client is null ? "client:unknown" : $"client:{result.Client.Name}";
+            // Every attempt is in the activity log; the audit trail gets one entry per IP, client and reason per minute.
+            var (writeAudit, suppressed) = throttle.RecordFailure(ctx.ClientIp(), $"{actor}|{result.Failure}");
+            if (writeAudit)
+                await audit.WriteAsync(actor, "api.authenticate", AuditResult.Denied, env.Name, ctx.Request.Path, ctx.ClientIp(),
+                    suppressed > 0 ? $"{result.Failure} (+{suppressed} similar in the previous minute)" : result.Failure, ctx.RequestAborted);
             return Unauthorized(ctx, result.Failure);
         }
 

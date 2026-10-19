@@ -146,13 +146,23 @@ public sealed partial class ProxyRouteService(
 {
     public static readonly string[] LoadBalancingPolicies = ["PowerOfTwoChoices", "RoundRobin", "LeastRequests", "Random", "FirstAlphabetical"];
 
-    /// <summary>Top-level path segments owned by Keyport itself; a route may not shadow them.</summary>
-    public static readonly HashSet<string> ReservedSegments = new(StringComparer.OrdinalIgnoreCase)
-    {
+    /// <summary>
+    /// Top-level path segments owned by Keyport itself; a route may not shadow them. Every UI page's first segment is
+    /// added automatically (from its @page routes), so new pages are protected without editing this list.
+    /// </summary>
+    public static readonly HashSet<string> ReservedSegments = new(PageSegments().Concat(
+    [
         "api", "admin", "account", "health", "openapi", "ca.crt", "_blazor", "_framework", "_content", "lib", "js", "css", "img",
-        "components", "secrets", "secret", "clients", "compare", "users", "certificates", "audit", "activity", "system", "proxy",
+        "components", "secrets", "secret", "secret-types", "clients", "compare", "users", "certificates", "audit", "activity", "system", "proxy",
         "not-found", "error", "favicon.svg", "app.css",
-    };
+    ]), StringComparer.OrdinalIgnoreCase);
+
+    private static IEnumerable<string> PageSegments() =>
+        typeof(ProxyRouteService).Assembly.GetTypes()
+            .SelectMany(t => t.GetCustomAttributes(typeof(Microsoft.AspNetCore.Components.RouteAttribute), inherit: false))
+            .Cast<Microsoft.AspNetCore.Components.RouteAttribute>()
+            .Select(r => r.Template.Trim('/').Split('/')[0])
+            .Where(s => s.Length > 0 && !s.StartsWith('{'));
 
     [GeneratedRegex(@"^/[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$")]
     private static partial Regex PrefixRegex();
@@ -299,9 +309,12 @@ public sealed partial class ProxyRouteService(
         if (destinations.Count == 0) throw new ValidationException("At least one upstream URL is required.");
         foreach (var d in destinations) ValidateDestination(d);
 
-        var allowedPorts = environments.All.Select(x => x.Port).Append(environments.AdminPort).ToHashSet();
+        var allowedPorts = environments.All.Select(x => x.Port).ToHashSet();
+        if (options.Value.Proxy.AllowAdminPort) allowedPorts.Add(environments.AdminPort);
         var ports = req.Ports.Distinct().Order().ToList();
         if (ports.Count == 0) throw new ValidationException("Select at least one port to serve the route on.");
+        if (ports.Contains(environments.AdminPort) && !allowedPorts.Contains(environments.AdminPort))
+            throw new ValidationException($"Routes can't be served on the admin port {environments.AdminPort}: the upstream would share the admin UI's origin. Choose an environment port.");
         if (ports.FirstOrDefault(p => !allowedPorts.Contains(p)) is var bad and > 0)
             throw new ValidationException($"Port {bad} is not a Keyport HTTPS listener.");
 
@@ -341,32 +354,36 @@ public sealed partial class ProxyRouteService(
             throw new ValidationException("Upstream URLs must not contain credentials.");
 
         var host = uri.IdnHost;
-        IPAddress.TryParse(host, out var ip);
-        if (ip is not null && IsLinkLocal(ip))
-            throw new ValidationException($"{host} is a link-local / cloud-metadata address and is never allowed.");
         if (host.Equals("metadata.google.internal", StringComparison.OrdinalIgnoreCase))
             throw new ValidationException("Cloud metadata endpoints are never allowed.");
 
+        // Same rules the proxy applies when it connects (UpstreamGuard); names are resolved now as an early warning.
         var allow = options.Value.Proxy.AllowedUpstreams;
-        if (allow.Count > 0 && !allow.Any(a => Matches(a.Trim(), host, ip)))
+        if (IPAddress.TryParse(host.Trim('[', ']'), out var ip))
+        {
+            if (Edge.UpstreamGuard.Check(host, [ip], options.Value.Proxy) is { } error) throw new ValidationException(error);
+        }
+        else if (ResolveQuickly(host) is { Length: > 0 } resolved)
+        {
+            if (Edge.UpstreamGuard.Check(host, resolved, options.Value.Proxy) is { } error) throw new ValidationException(error);
+        }
+        else if (allow.Count > 0 && !allow.Any(a => Edge.UpstreamGuard.Matches(a.Trim(), host, null)))
+        {
             throw new ValidationException($"{host} is not in Keyport:Proxy:AllowedUpstreams.");
+        }
 
         return uri.AbsoluteUri.EndsWith('/') ? uri : new Uri(uri.AbsoluteUri + "/");
     }
 
-    private static bool Matches(string entry, string host, IPAddress? ip)
+    /// <summary>Best-effort DNS lookup (2 s) for early feedback; the authoritative check happens at connect time.</summary>
+    private static IPAddress[]? ResolveQuickly(string host)
     {
-        if (entry.Contains('/'))
-            return ip is not null && IPNetwork.TryParse(entry, out var net) && net.Contains(ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip);
-        if (entry.StartsWith("*.", StringComparison.Ordinal))
-            return host.EndsWith(entry[1..], StringComparison.OrdinalIgnoreCase);
-        return host.Equals(entry, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsLinkLocal(IPAddress ip)
-    {
-        if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
-        return ip.IsIPv6LinkLocal || IPNetwork.Parse("169.254.0.0/16").Contains(ip) || IPNetwork.Parse("fd00:ec2::/32").Contains(ip);
+        try
+        {
+            var lookup = Dns.GetHostAddressesAsync(host);
+            return lookup.Wait(TimeSpan.FromSeconds(2)) ? lookup.Result : null;
+        }
+        catch (AggregateException) { return null; }
     }
 
     private static string Describe(ProxyRoute r, string? reason) =>

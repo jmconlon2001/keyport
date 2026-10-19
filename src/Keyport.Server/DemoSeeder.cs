@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
@@ -23,7 +24,7 @@ public static class DemoSeeder
 
     private sealed record DemoSecret(string Name, SecretType Type, string Description, string? Host = null, int? Port = null,
         string? Db = null, string? Service = null, string? User = null, string? Domain = null, string? Url = null, string? Tags = null,
-        string[]? Envs = null, int Versions = 1, int? RotateInDays = null);
+        string[]? Envs = null, int Versions = 1, int? RotateInDays = null, (string Key, string Value)[]? Fields = null);
 
     private static readonly DemoSecret[] Secrets =
     [
@@ -51,6 +52,13 @@ public static class DemoSeeder
         new("vega-telemetry/oracle-timeseries", SecretType.OracleConnection, "Vega flight telemetry time-series store",
             Host: "vega-ora-{env}." + Domain, Service: "TELEMPDB", User: "vega_ingest", Tags: "telemetry, tier-1", Envs: ["Dev", "Test", "Upgrade", "Prod"], Versions: 2),
         new("shared/license-starchart", SecretType.Generic, "StarChart route-planning licence key", Tags: "licensing", Envs: ["Prod", "Upgrade"]),
+        new("quasar-analytics/postgres-lakehouse", new("PostgresConnection"), "Quasar lakehouse catalogue (PostgreSQL)",
+            Host: "quasar-pg-{env}." + Domain, Db: "lakehouse", User: "quasar_catalog", Tags: "analytics, postgres", Envs: ["Dev", "Test", "Prod"], Versions: 2,
+            Fields: [("sslMode", "VerifyFull")]),
+        new("pulsar-notify/redis-queue", new("RedisConnection"), "Pulsar alert fan-out queue (Redis)",
+            Host: "pulsar-redis-{env}." + Domain, Port: 6380, User: "pulsar-worker", Tags: "messaging, cache", Fields: [("tls", "true")]),
+        new("mission-control/portal-tls", new("TlsCertificate"), "TLS certificate for the Mission Control portal",
+            Host: "portal.{env}." + Domain, Tags: "certificates, web", Envs: ["Test", "Upgrade", "Prod"]),
     ];
 
     private sealed record DemoApp(string Name, string Owner, string[] Grants, int KeyAgeDays, string[]? Envs = null, bool Disabled = false, string? Cidrs = null, int? ExpiresInDays = null);
@@ -64,7 +72,7 @@ public static class DemoSeeder
         new("pulsar-notify", "Crew Comms team", ["pulsar-notify/*"], 200, ExpiresInDays: 60),
         new("vega-ingest", "Flight Data team · leo.okafor@" + Domain, ["vega-telemetry/oracle-timeseries"], 30),
         new("quasar-loader", "Data & Insights", ["quasar-analytics/*", "vega-telemetry/oracle-timeseries"], 600, Envs: ["Dev", "Test"], Disabled: true),
-        new("mission-control-portal", "Mission Control web team", ["orion-ledger/sql-reporting", "atlas-inventory/*", "shared/*"], 75, Envs: ["Test", "Upgrade", "Prod"]),
+        new("mission-control-portal", "Mission Control web team", ["orion-ledger/sql-reporting", "atlas-inventory/*", "mission-control/*", "shared/*"], 75, Envs: ["Test", "Upgrade", "Prod"]),
     ];
 
     private sealed record DemoUser(string UserName, string Display, bool Admin, bool Auditor, Dictionary<string, EnvironmentRole> Roles);
@@ -152,8 +160,24 @@ public static class DemoSeeder
                     Encrypt = "Mandatory",
                     ApplicationName = s.Type == SecretType.SqlServerConnection ? s.Name.Split('/')[0] : null,
                 };
+                foreach (var (k, v) in s.Fields ?? []) meta[k] = v;
+                string? tlsKey = null;
+                if (s.Type.Key == "TlsCertificate")
+                {
+                    // A real (self-signed) certificate and matching key, so the PEM checks pass.
+                    using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+                    var req = new CertificateRequest($"CN={meta.Host}", key, HashAlgorithmName.SHA256);
+                    var san = new SubjectAlternativeNameBuilder();
+                    san.AddDnsName(meta.Host!);
+                    req.CertificateExtensions.Add(san.Build());
+                    using var cert = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-20), DateTimeOffset.UtcNow.AddDays(70));
+                    meta["certificate"] = cert.ExportCertificatePem();
+                    tlsKey = key.ExportPkcs8PrivateKeyPem();
+                }
                 SecretPayload Payload() => s.Type == SecretType.Generic
                     ? new SecretPayload { Value = "nmb_" + PasswordGenerator.Generate(40, symbols: false) }
+                    : tlsKey is not null
+                    ? SecretPayload.From([KeyValuePair.Create("privateKey", (string?)tlsKey)])
                     : new SecretPayload { Username = s.User + (s.Type == SecretType.OracleConnection || s.Type == SecretType.SqlServerConnection ? (env.Name == "Prod" ? "" : "_" + tag) : ""), Password = PasswordGenerator.Generate(24) };
 
                 var id = await secrets.CreateAsync(actor, env.Id, new SaveSecretRequest
@@ -210,20 +234,21 @@ public static class DemoSeeder
 
         // ---- Reverse proxy routes ----
         var proxy = sp.GetRequiredService<ProxyRouteService>();
-        var adminPort = envs.AdminPort;
-        foreach (var (name, desc, upstream, accessLevel, enabled) in new[]
+        // Environment ports only: routes are never served on the admin port (they'd share the admin UI's origin).
+        int Port(string env) => envs.All.First(e => e.Name == env).Port;
+        foreach (var (name, desc, upstream, accessLevel, enabled, env) in new[]
         {
-            ("grafana", "Fleet observability dashboards", "http://grafana." + Domain + ":3000/", ProxyAccess.SignedIn, true),
-            ("runbooks", "Mission Control runbooks wiki", "http://runbooks." + Domain + ":8080/", ProxyAccess.SignedIn, true),
-            ("status-board", "Public launch status board", "http://statusboard." + Domain + "/", ProxyAccess.Anonymous, true),
-            ("kibana", "Legacy log search (retiring)", "http://kibana." + Domain + ":5601/", ProxyAccess.Admins, false),
+            ("grafana", "Fleet observability dashboards", "http://grafana." + Domain + ":3000/", ProxyAccess.SignedIn, true, "Prod"),
+            ("runbooks", "Mission Control runbooks wiki", "http://runbooks." + Domain + ":8080/", ProxyAccess.SignedIn, true, "Prod"),
+            ("status-board", "Public launch status board", "http://statusboard." + Domain + "/", ProxyAccess.Anonymous, true, "Prod"),
+            ("kibana", "Legacy log search (retiring)", "http://kibana." + Domain + ":5601/", ProxyAccess.Admins, false, "Test"),
         })
         {
             try
             {
                 await proxy.CreateAsync(ava, new SaveProxyRouteRequest
                 {
-                    Name = name, Description = desc, PathPrefix = "/" + name, Destinations = upstream, Ports = [adminPort],
+                    Name = name, Description = desc, PathPrefix = "/" + name, Destinations = upstream, Ports = [Port(env)],
                     Access = accessLevel, RelaxCsp = name is "grafana" or "kibana", Enabled = enabled, Reason = "Publish internal tools via Keyport edge",
                 }, "10.20.1.15");
             }

@@ -700,3 +700,13 @@ img.brand-logo { display: block; object-fit: cover; padding: 0; background: #090
 
 /* Blazor moves focus to the page heading after navigation (for screen readers); don't draw a ring for that. */
 h1:focus, h1:focus-visible { outline: none; }
+
+/* Pluggable secret types */
+.type-icon { background: color-mix(in srgb, var(--tc, #64748b) 14%, transparent); color: var(--tc, #64748b); }
+.type-group-title { font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--sm-muted); margin: 1rem 0 .5rem; }
+.type-group-title:first-of-type { margin-top: .25rem; }
+.kind-filter { max-width: 260px; }
+.field-table td, .field-table th { font-size: .84rem; }
+.field-table td { white-space: normal; }
+.field-table td:first-child { min-width: 11rem; }
+.field-table td:last-child { min-width: 9rem; overflow-wrap: anywhere; }

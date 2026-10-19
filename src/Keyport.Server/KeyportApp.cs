@@ -1,16 +1,20 @@
 using System.Net;
 using System.Security.Authentication;
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authentication;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using Keyport.Core.Crypto;
+using Keyport.Core.Secrets.Types;
 using Keyport.Server.Api;
 using Keyport.Server.Components;
 using Keyport.Server.Components.Account;
@@ -52,6 +56,10 @@ public static class KeyportApp
 
         Directory.CreateDirectory(smOptions.DataPath);
 
+        // Secret types: built-in + configuration + JSON files. Invalid definitions stop startup with a clear message.
+        var registry = SecretTypeLoader.Load(smOptions);
+        builder.Services.AddSingleton(registry);
+
         // Fail fast without the master key: nothing can be decrypted.
         var masterKey = MasterKey.LoadFromFile(smOptions.MasterKeyFile);
         var encryptor = new EnvelopeEncryptor(masterKey);
@@ -84,11 +92,15 @@ public static class KeyportApp
         builder.Services.AddSingleton<ApiClientService>();
         builder.Services.AddSingleton<AuditIntegrityMonitor>();
         builder.Services.AddSingleton<ConnectionTester>();
+        builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.AddSingleton<FailedAuthThrottle>();
         builder.Services.AddSingleton<UserAdminService>();
         builder.Services.AddScoped<StatusService>();
         builder.Services.AddScoped<AccessService>();
         builder.Services.AddScoped<CircuitClientInfo>();
         builder.Services.AddScoped<CircuitHandler, ClientInfoCircuitHandler>();
+        builder.Services.AddScoped<CircuitSession>();
+        builder.Services.AddScoped<CircuitHandler, CircuitActivityHandler>();
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddHostedService<CertificateRenewalService>();
         builder.Services.AddHostedService<ActivityLogWriter>();
@@ -130,19 +142,44 @@ public static class KeyportApp
             })
             .AddRoles<IdentityRole>()
             .AddEntityFrameworkStores<ApplicationDbContext>()
+            .AddUserStore<KeyportUserStore>()          // authenticator keys and recovery codes encrypted under the master key
             .AddSignInManager()
             .AddDefaultTokenProviders()
             .AddClaimsPrincipalFactory<AppClaimsPrincipalFactory>();
 
-        builder.Services.Configure<SecurityStampValidatorOptions>(o => o.ValidationInterval = TimeSpan.FromMinutes(1));
+        builder.Services.Configure<SecurityStampValidatorOptions>(o =>
+        {
+            o.ValidationInterval = TimeSpan.FromMinutes(1);
+            // Refreshing the principal must not restart the session clock.
+            o.OnRefreshingPrincipal = ctx =>
+            {
+                if (ctx.CurrentPrincipal?.FindFirst(SessionSecurity.AuthTimeClaim) is { } t && ctx.NewPrincipal?.Identity is ClaimsIdentity id)
+                {
+                    foreach (var c in id.FindAll(SessionSecurity.AuthTimeClaim).ToList()) id.RemoveClaim(c);
+                    id.AddClaim(new Claim(t.Type, t.Value, t.ValueType));
+                }
+                return Task.CompletedTask;
+            };
+        });
         builder.Services.ConfigureApplicationCookie(o =>
         {
             o.Cookie.Name = "__Host-kp-auth";
             o.Cookie.SecurePolicy = CookieSecurePolicy.Always;
             o.Cookie.SameSite = SameSiteMode.Strict;
             o.Cookie.HttpOnly = true;
-            o.ExpireTimeSpan = TimeSpan.FromHours(8);
+            // Idle timeout: the cookie slides while the person is active (open tabs ping /admin/api/ping); absolute limit below.
+            o.ExpireTimeSpan = TimeSpan.FromMinutes(smOptions.Auth.IdleTimeoutMinutes);
             o.SlidingExpiration = true;
+            o.Events.OnValidatePrincipal = async ctx =>
+            {
+                if (ctx.Principal is { } p && SessionSecurity.IsExpired(p, smOptions.Auth, DateTimeOffset.UtcNow))
+                {
+                    ctx.RejectPrincipal();
+                    await ctx.HttpContext.SignOutAsync(IdentityConstants.ApplicationScheme);
+                    return;
+                }
+                await SecurityStampValidator.ValidatePrincipalAsync(ctx);
+            };
             o.LoginPath = "/Account/Login";
             o.AccessDeniedPath = "/Account/AccessDenied";
             // APIs get status codes, not login-page redirects.
@@ -150,6 +187,9 @@ public static class KeyportApp
             o.Events.OnRedirectToLogin = ctx =>
             {
                 if (IsApi(ctx.Request)) ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                // Signed-in proxy routes on environment ports: sign in on the admin port (no return URL across origins).
+                else if (ctx.HttpContext.Listener().Kind != ListenerKind.Admin)
+                    ctx.Response.Redirect($"https://{ctx.HttpContext.SafeHost(smOptions.Edge)}:{smOptions.Edge.AdminPort}/Account/Login");
                 else ctx.Response.Redirect(ctx.RedirectUri);
                 return Task.CompletedTask;
             };
@@ -160,6 +200,13 @@ public static class KeyportApp
                 return Task.CompletedTask;
             };
         });
+        // "Remember this machine" (skip MFA for 14 days) is not offered, and any such cookie issued earlier is ignored.
+        builder.Services.Configure<CookieAuthenticationOptions>(IdentityConstants.TwoFactorRememberMeScheme, o =>
+            o.Events.OnValidatePrincipal = ctx =>
+            {
+                ctx.RejectPrincipal();
+                return Task.CompletedTask;
+            });
         builder.Services.AddAntiforgery(o =>
         {
             o.Cookie.Name = "__Host-kp-af";
@@ -202,15 +249,21 @@ public static class KeyportApp
         }));
 
         // Optional upstream routes (built-in reverse proxy). Each route must declare Metadata.Ports.
-        builder.Services.AddReverseProxy().LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));
+        // Every route strips Keyport's cookies and API keys from requests and Keyport cookies from responses.
+        builder.Services.AddReverseProxy().LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
+            .AddTransforms(ProxyHardeningTransforms.Apply)
+            .ConfigureHttpClient((_, handler) => handler.ConnectCallback = UpstreamGuard.ConnectCallback(() => smOptions.Proxy));
         // Routes managed in the UI: stored in the database (on the /data volume), loaded at startup, applied live on save.
         builder.Services.AddSingleton<DbProxyConfigProvider>();
         builder.Services.AddSingleton<Yarp.ReverseProxy.Configuration.IProxyConfigProvider>(sp => sp.GetRequiredService<DbProxyConfigProvider>());
         builder.Services.AddSingleton<ProxyRouteService>();
-        builder.Services.AddHttpClient("proxy-test", c => c.Timeout = TimeSpan.FromSeconds(5));
+        builder.Services.AddHttpClient("proxy-test", c => c.Timeout = TimeSpan.FromSeconds(5))
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { ConnectCallback = UpstreamGuard.ConnectCallback(() => smOptions.Proxy) });
 
         var app = builder.Build();
         ConfigurePipeline(app);
+        // Published last, so a startup that fails later can't replace the catalogue in use.
+        SecretTypeRegistry.Current = registry;
         return app;
     }
 
@@ -265,6 +318,7 @@ public static class KeyportApp
         app.UseAuthentication();
         app.UseAuthorization();
         app.UseMiddleware<ActivityLoggingMiddleware>();
+        app.UseMiddleware<AdminOriginGuardMiddleware>();   // after logging, so refusals are visible in the activity log
         app.UseMiddleware<AccountEnforcementMiddleware>();
         app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
         app.UseAntiforgery();
@@ -316,10 +370,25 @@ public static class KeyportApp
 
             await app.Services.GetRequiredService<EnvironmentRegistry>().SyncAsync(db);
 
+            // Authenticator keys / recovery codes stored by earlier versions in clear are encrypted now.
+            var encrypted = await ProtectedTokens.EncryptExistingAsync(db, encryptor);
+            if (encrypted > 0) logger.LogInformation("Encrypted {Count} stored authenticator key(s) / recovery code set(s) under the master key", encrypted);
+
             // Restore UI-managed reverse-proxy routes persisted in the database.
             var proxy = app.Services.GetRequiredService<DbProxyConfigProvider>();
             proxy.Reload();
             logger.LogInformation("Loaded {Count} reverse-proxy route(s) from the database", proxy.GetConfig().Routes.Count);
+            if (!options.Proxy.AllowAdminPort)
+            {
+                var adminPort = options.Edge.AdminPort.ToString();
+                var onAdmin = proxy.GetConfig().Routes.Concat(app.Configuration.GetSection("ReverseProxy:Routes").GetChildren()
+                        .Select(c => new Yarp.ReverseProxy.Configuration.RouteConfig { RouteId = c.Key, Metadata = new Dictionary<string, string> { ["Ports"] = c["Metadata:Ports"] ?? "" } }))
+                    .Where(r => (r.Metadata?.GetValueOrDefault("Ports") ?? "").Split(',', StringSplitOptions.TrimEntries).Contains(adminPort))
+                    .Select(r => r.RouteId).ToList();
+                if (onAdmin.Count > 0)
+                    logger.LogWarning("Proxy route(s) {Routes} list the admin port {Port}; they are NOT served there (Keyport:Proxy:AllowAdminPort is off). Move them to an environment port.",
+                        string.Join(", ", onAdmin), adminPort);
+            }
             await SeedAsync(scope.ServiceProvider, options, logger);
         }
 
@@ -338,9 +407,16 @@ public static class KeyportApp
                 await roles.CreateAsync(new IdentityRole(r));
 
         var users = sp.GetRequiredService<UserManager<ApplicationUser>>();
-        if (await users.Users.AnyAsync()) return;
+        if (await users.Users.AnyAsync())
+        {
+            // The one-time password file is removed once the first admin has changed it.
+            if (File.Exists(BootstrapAdmin.PathFor(options))
+                && await users.FindByNameAsync(options.BootstrapAdminUser) is not { MustChangePassword: true })
+                BootstrapAdmin.Forget(options);
+            return;
+        }
 
-        var password = PasswordGenerator.Generate(20);
+        var (password, supplied) = BootstrapAdmin.ChoosePassword(options);
         var admin = new ApplicationUser
         {
             UserName = options.BootstrapAdminUser,
@@ -353,63 +429,76 @@ public static class KeyportApp
             throw new InvalidOperationException("Could not create bootstrap admin: " + string.Join("; ", result.Errors.Select(e => e.Description)));
         await users.AddToRoleAsync(admin, Roles.Admin);
 
-        // Shown once. The account must change it and enrol MFA at first sign-in.
+        // Never logged: logs are often shipped and retained. The account must change it and enrol MFA at first sign-in.
+        if (!supplied) BootstrapAdmin.Save(options, admin.UserName!, password);
         logger.LogWarning("""
 
             ================================================================
               Bootstrap administrator created
                 user:     {User}
-                password: {Password}
+                password: {Where}
               You must change this password and enrol MFA at first sign-in.
             ================================================================
-            """, admin.UserName, password);
+            """, admin.UserName, supplied
+                ? $"the one in {options.BootstrapAdminPasswordFile}"
+                : $"run `dotnet Keyport.Server.dll --bootstrap-password` in the container (podman exec keyport …); stored in {BootstrapAdmin.PathFor(options)} until changed");
         await sp.GetRequiredService<AuditService>().WriteAsync("system", "user.bootstrap", AuditResult.Success, target: admin.UserName);
     }
 }
 
 /// <summary>
-/// Forces first-sign-in hygiene on the admin port: users flagged MustChangePassword must change it, and every
-/// user must enrol an authenticator app or passkey before using the app.
+/// Forces first-sign-in hygiene on the admin port. Until a signed-in user has changed a required password and enrolled
+/// an authenticator app or passkey, the ONLY things they can reach are the /Account pages and static files:
+/// page requests are redirected to the step they still need; everything else (the Blazor hub, admin API, OpenAPI,
+/// form posts, downloads) gets 403. <see cref="AccessService"/> applies the same rule, so services refuse too.
 /// </summary>
 public sealed class AccountEnforcementMiddleware(RequestDelegate next)
 {
+    private static readonly string[] StaticExtensions = [".css", ".js", ".svg", ".png", ".ico", ".woff", ".woff2", ".map"];
+
     public async Task InvokeAsync(HttpContext ctx, UserManager<ApplicationUser> users)
     {
         var path = ctx.Request.Path;
         if (ctx.User.Identity?.IsAuthenticated != true
             || ctx.Listener().Kind != ListenerKind.Admin
-            || !HttpMethods.IsGet(ctx.Request.Method)
             || path.StartsWithSegments("/Account")
-            || path.StartsWithSegments("/_blazor")
-            || path.StartsWithSegments("/_framework")
             || path.StartsWithSegments("/health")
-            || Path.HasExtension(path.Value))
+            || IsStaticFile(ctx.Request))
         {
             await next(ctx);
             return;
         }
 
         var user = await users.GetUserAsync(ctx.User);
-        if (user is null)
+        var step = user is null ? null : await PendingStepAsync(users, user);
+        if (step is null)
         {
             await next(ctx);
             return;
         }
 
-        if (user.MustChangePassword)
+        var isPage = HttpMethods.IsGet(ctx.Request.Method)
+            && !path.StartsWithSegments("/_blazor") && !path.StartsWithSegments("/admin/api") && !path.StartsWithSegments("/openapi");
+        if (isPage) ctx.Response.Redirect(step);
+        else
         {
-            ctx.Response.Redirect("/Account/Manage/ChangePassword?required=1");
-            return;
+            ctx.Items["sm.error"] = "account setup incomplete (password change or MFA enrolment)";
+            ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
         }
-
-        if (!user.TwoFactorEnabled && (await users.GetPasskeysAsync(user)).Count == 0)
-        {
-            ctx.Response.Redirect("/Account/Manage/EnableAuthenticator?required=1");
-            return;
-        }
-
-        await next(ctx);
     }
+
+    /// <summary>The page the user must complete next, or null when the account is fully set up.</summary>
+    public static async Task<string?> PendingStepAsync(UserManager<ApplicationUser> users, ApplicationUser user)
+    {
+        if (user.MustChangePassword) return "/Account/Manage/ChangePassword?required=1";
+        if (!user.TwoFactorEnabled && (await users.GetPasskeysAsync(user)).Count == 0) return "/Account/Manage/EnableAuthenticator?required=1";
+        return null;
+    }
+
+    private static bool IsStaticFile(HttpRequest r) =>
+        (HttpMethods.IsGet(r.Method) || HttpMethods.IsHead(r.Method))
+        && (r.Path.StartsWithSegments("/_framework") || r.Path.StartsWithSegments("/_content")
+            || StaticExtensions.Contains(Path.GetExtension(r.Path.Value ?? ""), StringComparer.OrdinalIgnoreCase));
 }
 
 /// <summary>Client address for the current Blazor circuit (HttpContext is not available in interactive components).</summary>

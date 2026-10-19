@@ -31,7 +31,8 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
         {
             e.HasIndex(x => new { x.EnvironmentId, x.Name }).IsUnique();
             e.Property(x => x.Name).HasMaxLength(200);
-            e.Property(x => x.Type).HasConversion<string>().HasMaxLength(40);
+            // Stored as the type key (same values as before types became pluggable).
+            e.Property(x => x.Type).HasConversion(t => t.Key, k => new Keyport.Core.Secrets.SecretType(k)).HasMaxLength(40);
             e.HasMany(x => x.Versions).WithOne(v => v.Secret).HasForeignKey(v => v.SecretId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne(x => x.Environment).WithMany().OnDelete(DeleteBehavior.Restrict);
             e.Ignore(x => x.Metadata);

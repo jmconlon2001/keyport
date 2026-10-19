@@ -7,19 +7,28 @@ using Keyport.Server.Data;
 
 namespace Keyport.Server.Components.Account;
 
-// This is a server-side AuthenticationStateProvider that revalidates the security stamp for the connected user
-// every 30 minutes an interactive circuit is connected.
+// Server-side AuthenticationStateProvider for interactive circuits (open tabs). Every minute it signs the tab out if
+// the security stamp changed (password, roles, MFA or account disabled), the tab has been idle too long, or the
+// session is past its absolute lifetime.
 internal sealed class IdentityRevalidatingAuthenticationStateProvider(
         ILoggerFactory loggerFactory,
         IServiceScopeFactory scopeFactory,
-        IOptions<IdentityOptions> options)
+        IOptions<IdentityOptions> options,
+        IOptions<Keyport.Server.Configuration.KeyportOptions> keyport,
+        Keyport.Server.Services.CircuitSession session,
+        TimeProvider time)
     : RevalidatingServerAuthenticationStateProvider(loggerFactory)
 {
-    protected override TimeSpan RevalidationInterval => TimeSpan.FromMinutes(30);
+    protected override TimeSpan RevalidationInterval => TimeSpan.FromMinutes(1);
 
     protected override async Task<bool> ValidateAuthenticationStateAsync(
         AuthenticationState authenticationState, CancellationToken cancellationToken)
     {
+        var auth = keyport.Value.Auth;
+        var now = time.GetUtcNow();
+        if (now - session.LastActivity > TimeSpan.FromMinutes(auth.IdleTimeoutMinutes)) return false;
+        if (Keyport.Server.Services.SessionSecurity.IsExpired(authenticationState.User, auth, now)) return false;
+
         // Get the user manager from a new scope to ensure it fetches fresh data
         await using var scope = scopeFactory.CreateAsyncScope();
         var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();

@@ -122,11 +122,26 @@ public sealed class CertificateManager(
         }
 
         logger.LogWarning("No CA found in {CaDir}; generating a new root CA. Distribute root.crt to clients.", CaDir);
-        var root = CertificateAuthority.CreateRoot(ca.CommonName, TimeSpan.FromDays(ca.RootLifetimeDays));
+        var root = CertificateAuthority.CreateRoot(ca.CommonName, TimeSpan.FromDays(ca.RootLifetimeDays), ca.NameConstraints ? RootConstraints() : null);
         WriteBlob(RootKeyPath, encryptor.Encrypt(CertificateAuthority.ExportPrivateKeyPkcs8(root), RootAad));
         File.WriteAllText(RootCertPath, root.ExportCertificatePem());
         return root;
     }
+
+    /// <summary>Names a generated root may vouch for: Keyport's own host names and IPs plus any configured suffixes/ranges.</summary>
+    private NameConstraints RootConstraints()
+    {
+        var o = options.Value;
+        var dns = o.Edge.HostNames.Concat(o.Ca.PermittedDnsSuffixes).Where(n => !IPAddress.TryParse(n, out _)).ToList();
+        var ips = !o.Ca.ConstrainIpAddresses ? [] : o.Edge.IpAddresses.Select(s => IPAddress.TryParse(s, out var ip) ? new IPNetwork(ip, ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128) : (IPNetwork?)null)
+            .OfType<IPNetwork>()
+            .Concat(o.Ca.PermittedIpRanges.Select(r => IPNetwork.Parse(r)))
+            .ToList();
+        return new NameConstraints(dns, ips);
+    }
+
+    /// <summary>Set when the configured names fall outside the root's name constraints (clients would reject the certificate).</summary>
+    public string? NameConstraintProblem { get; private set; }
 
     private X509Certificate2? TryLoadServer()
     {
@@ -146,7 +161,13 @@ public sealed class CertificateManager(
     private void IssueServerCertificate(string reason)
     {
         var edge = options.Value.Edge;
-        var ips = edge.IpAddresses.Select(s => IPAddress.TryParse(s, out var ip) ? ip : null).OfType<IPAddress>();
+        var ips = edge.IpAddresses.Select(s => IPAddress.TryParse(s, out var ip) ? ip : null).OfType<IPAddress>().ToList();
+
+        var outside = NameConstraints.Read(_issuer!)?.Violations(edge.HostNames, ips).ToList() ?? [];
+        NameConstraintProblem = outside.Count == 0 ? null
+            : $"{string.Join(", ", outside)} {(outside.Count == 1 ? "is" : "are")} outside the CA's name constraints; clients will reject the certificate for {(outside.Count == 1 ? "it" : "them")}. Use a name inside them, or create a new CA (see README §4.3).";
+        if (NameConstraintProblem is not null) logger.LogError("{Problem}", NameConstraintProblem);
+
         var cert = CertificateAuthority.IssueServerCertificate(
             _issuer!, edge.HostNames, ips, TimeSpan.FromDays(options.Value.Ca.LeafLifetimeDays));
 

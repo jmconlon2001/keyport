@@ -36,6 +36,26 @@ public sealed class ServerFixture : IAsyncLifetime
     public AuditService Audit => App.Services.GetRequiredService<AuditService>();
     public EnvironmentInfo Env(string name) => Environments.ByName(name)!;
 
+    /// <summary>A type defined only by a JSON file (no code), loaded by every test server.</summary>
+    public const string CustomTypeJson = """
+        // comments and trailing commas are allowed
+        {
+          "key": "SearchCluster",
+          "title": "Search cluster",
+          "category": "database",
+          "fields": [
+            { "key": "url", "label": "Cluster address", "kind": "Url", "required": true },
+            { "key": "username", "label": "User name", "sensitive": true, "copyOnPromote": true },
+            { "key": "apiKey", "label": "API key", "kind": "Password", "sensitive": true, "required": true },
+          ],
+          "outputs": [
+            { "key": "connectionString", "label": "Connection", "renderer": "template",
+              "settings": { "template": "{{url}};ApiKey={{apiKey|base64}}" } },
+          ],
+          "tester": "tcp",
+        }
+        """;
+
     public string[] Args()
     {
         var args = new List<string>
@@ -48,6 +68,8 @@ public sealed class ServerFixture : IAsyncLifetime
             "--Keyport:Edge:HostNames:0=localhost",
             "--Keyport:Edge:IpAddresses:0=127.0.0.1",
             "--Keyport:Logs:ApiLogRetentionDays=30",
+            "--Keyport:Edge:FailedAuthPerMinute=100000",   // every test calls from 127.0.0.1
+            "--Keyport:ConnectionTest:AllowedTargets:0=127.0.0.1/32",   // tests use local listeners
             "--Keyport:Logs:UiLogRetentionDays=30",
             "--Keyport:Logs:AuditRetentionDays=0",
             "--Keyport:Proxy:AllowedUpstreams:0=127.0.0.1/32",
@@ -67,6 +89,8 @@ public sealed class ServerFixture : IAsyncLifetime
     {
         Directory.CreateDirectory(DataDir);
         await File.WriteAllTextAsync(KeyFile, MasterKey.GenerateBase64());
+        Directory.CreateDirectory(Path.Combine(DataDir, "secret-types"));
+        await File.WriteAllTextAsync(Path.Combine(DataDir, "secret-types", "search.json"), CustomTypeJson);
         HttpPort = FreePort();
         AdminPort = FreePort();
         foreach (var n in EnvNames) EnvPorts[n] = FreePort();
@@ -97,12 +121,14 @@ public sealed class ServerFixture : IAsyncLifetime
         try { Directory.Delete(DataDir, recursive: true); } catch (IOException) { }
     }
 
-    /// <summary>HttpClient that trusts only the server's internal CA (no validation bypass).</summary>
-    public HttpClient Client(string? apiKey = null)
+    /// <summary>HttpClient that trusts only the server's internal CA (no validation bypass). Cookies are off unless asked for.</summary>
+    public HttpClient Client(string? apiKey = null, System.Net.CookieContainer? cookies = null)
     {
         var handler = new SocketsHttpHandler
         {
             AllowAutoRedirect = false,
+            UseCookies = cookies is not null,
+            CookieContainer = cookies ?? new System.Net.CookieContainer(),
             SslOptions =
             {
                 CertificateChainPolicy = new X509ChainPolicy
@@ -435,10 +461,11 @@ public class ApiIntegrationTests(ServerFixture f)
         {
             var json = await http.GetFromJsonAsync<JsonElement>(url);
             Assert.Equal("Healthy", json.GetProperty("status").GetString());
-            var names = json.GetProperty("checks").EnumerateArray().Select(c => c.GetProperty("name").GetString()).ToList();
-            Assert.Contains("database", names);
-            Assert.Contains("master-key", names);
-            Assert.Contains("certificates", names);
+            // Anonymous probes get the status only: no key ID, certificate dates, disk or audit details.
+            Assert.False(json.TryGetProperty("checks", out _));
+            var raw = json.GetRawText();
+            Assert.DoesNotContain("keyId", raw);
+            Assert.DoesNotContain("NotAfter", raw);
         }
         Assert.Equal(HttpStatusCode.OK, (await http.GetAsync(f.Url("Prod", "/health/ready"))).StatusCode);
     }
@@ -814,5 +841,112 @@ public class EdgeHardeningTests(ServerFixture f)
         Assert.False(ui.Headers.Contains("Server"));
         var html = await ui.Content.ReadAsStringAsync();
         Assert.DoesNotMatch(@"<script(?![^>]*\bsrc=)[^>]*>", html); // no inline scripts
+    }
+}
+
+[Collection("server")]
+public class SecretTypeIntegrationTests(ServerFixture f)
+{
+    private async Task<string> ClientAsync(string env, string grants)
+    {
+        var e = f.Env(env);
+        var (_, key) = await f.Clients.CreateAsync(f.Admin, e.Id,
+            new SaveApiClientRequest { Name = $"types-{Guid.NewGuid():N}"[..20], Grants = grants, Reason = e.Protected ? "test" : null }, "127.0.0.1");
+        return key;
+    }
+
+    private static SecretMetadata Clear(params (string Key, string Value)[] v) => SecretMetadata.From(v.Select(x => KeyValuePair.Create(x.Key, (string?)x.Value)));
+    private static SecretPayload Sensitive(params (string Key, string Value)[] v) => SecretPayload.From(v.Select(x => KeyValuePair.Create(x.Key, (string?)x.Value)));
+
+    [Fact]
+    public async Task FileDefinedTypeWorksEndToEnd()
+    {
+        var dev = f.Env("Dev");
+        var test = f.Env("Test");
+        var id = await f.Secrets.CreateAsync(f.Admin, dev.Id, new SaveSecretRequest
+        {
+            Name = "custom/search",
+            Type = new SecretType("SearchCluster"),
+            Metadata = Clear(("url", "https://search.corp:9200"), ("notAField", "dropped")),
+            Payload = Sensitive(("username", "indexer"), ("apiKey", "k3y;=")),
+        }, null);
+
+        // Reveal: sensitive values come back; undefined keys were not stored.
+        var revealed = await f.Secrets.RevealAsync(f.Admin, id, null, null);
+        Assert.Equal("k3y;=", revealed["apiKey"]);
+        Assert.Null((await f.Secrets.GetAsync(f.Admin, id))!.Metadata["notAField"]);
+
+        // API: generic fields + rendered outputs, and /connections serves its connectionString output.
+        using var http = f.Client(await ClientAsync("Dev", "custom/*"));
+        var body = await http.GetFromJsonAsync<JsonElement>(f.Url("Dev", "/api/v1/secrets/custom/search"));
+        Assert.Equal("SearchCluster", body.GetProperty("type").GetString());
+        Assert.Equal("https://search.corp:9200", body.GetProperty("fields").GetProperty("url").GetString());
+        var expected = $"https://search.corp:9200;ApiKey={Convert.ToBase64String("k3y;="u8.ToArray())}";
+        Assert.Equal(expected, body.GetProperty("outputs").GetProperty("connectionString").GetString());
+        var conn = await http.GetFromJsonAsync<JsonElement>(f.Url("Dev", "/api/v1/connections/custom/search"));
+        Assert.Equal(expected, conn.GetProperty("connectionString").GetString());
+
+        // Promotion: clear fields and the copy-marked username carry over; the API key never does.
+        var draft = await f.Secrets.PreparePromotionAsync(f.Admin, id, test.Id, null);
+        Assert.Equal("https://search.corp:9200", draft.Metadata["url"]);
+        Assert.Equal("indexer", draft.Payload!["username"]);
+        Assert.Null(draft.Payload["apiKey"]);
+
+        // Missing required field is rejected.
+        await Assert.ThrowsAsync<ValidationException>(() => f.Secrets.CreateAsync(f.Admin, dev.Id, new SaveSecretRequest
+        {
+            Name = "custom/bad", Type = new SecretType("SearchCluster"), Metadata = Clear(("url", "https://x")), Payload = new SecretPayload(),
+        }, null));
+    }
+
+    [Fact]
+    public async Task UnregisteredTypesAreRejectedOnCreate()
+    {
+        await Assert.ThrowsAsync<ValidationException>(() => f.Secrets.CreateAsync(f.Admin, f.Env("Dev").Id, new SaveSecretRequest
+        {
+            Name = "custom/nope", Type = new SecretType("NoSuchType"), Payload = new SecretPayload { Value = "v" },
+        }, null));
+    }
+
+    [Fact]
+    public async Task NewBuiltInTypesAreServedByTheApi()
+    {
+        var dev = f.Env("Dev");
+        await f.Secrets.CreateAsync(f.Admin, dev.Id, new SaveSecretRequest
+        {
+            Name = "types/pg", Type = new SecretType("PostgresConnection"),
+            Metadata = Clear(("host", "pg-01.corp"), ("database", "telemetry"), ("sslMode", "Require")),
+            Payload = Sensitive(("username", "tele_app"), ("password", "p@ss;w0rd")),
+        }, null);
+        await f.Secrets.CreateAsync(f.Admin, dev.Id, new SaveSecretRequest
+        {
+            Name = "types/sftp", Type = new SecretType("SftpLogin"),
+            Metadata = Clear(("host", "sftp.partner.example")),
+            Payload = Sensitive(("username", "nimbus_upload"), ("password", "bind-pw")),
+        }, null);
+        await f.Secrets.CreateAsync(f.Admin, dev.Id, new SaveSecretRequest
+        {
+            Name = "types/aws", Type = new SecretType("AwsAccessKey"),
+            Metadata = Clear(("accessKeyId", "AKIAABCDEFGHIJKLMNOP")),
+            Payload = Sensitive(("secretAccessKey", "wJalr/EXAMPLE")),
+        }, null);
+
+        using var http = f.Client(await ClientAsync("Dev", "types/*"));
+
+        var pg = await http.GetFromJsonAsync<JsonElement>(f.Url("Dev", "/api/v1/connections/types/pg"));
+        var b = new System.Data.Common.DbConnectionStringBuilder { ConnectionString = pg.GetProperty("connectionString").GetString() };
+        Assert.Equal("p@ss;w0rd", b["Password"]);
+        Assert.Equal("pg-01.corp", pg.GetProperty("components").GetProperty("host").GetString());
+        var pgSecret = await http.GetFromJsonAsync<JsonElement>(f.Url("Dev", "/api/v1/secrets/types/pg"));
+        Assert.StartsWith("postgresql://tele_app:p%40ss%3Bw0rd@pg-01.corp/telemetry", pgSecret.GetProperty("outputs").GetProperty("url").GetString());
+
+        var sftp = await http.GetFromJsonAsync<JsonElement>(f.Url("Dev", "/api/v1/credentials/types/sftp"));
+        Assert.Equal("nimbus_upload", sftp.GetProperty("username").GetString());
+        Assert.Equal("bind-pw", sftp.GetProperty("password").GetString());
+
+        // No connection string and no username/password: other endpoints point the caller to /secrets.
+        Assert.Equal(HttpStatusCode.BadRequest, (await http.GetAsync(f.Url("Dev", "/api/v1/connections/types/aws"))).StatusCode);
+        var aws = await http.GetFromJsonAsync<JsonElement>(f.Url("Dev", "/api/v1/secrets/types/aws"));
+        Assert.Equal("wJalr/EXAMPLE", aws.GetProperty("fields").GetProperty("secretAccessKey").GetString());
     }
 }

@@ -29,12 +29,6 @@
                 <label for="Input.TwoFactorCode" class="form-label">Authenticator code</label>
                 <ValidationMessage For="() => Input.TwoFactorCode" class="text-danger" />
             </div>
-            <div class="checkbox mb-3">
-                <label for="remember-machine" class="form-label">
-                    <InputCheckbox @bind-Value="Input.RememberMachine" />
-                    Remember this machine
-                </label>
-            </div>
             <div>
                 <button type="submit" class="w-100 btn btn-lg btn-primary">Log in</button>
             </div>
@@ -64,14 +58,16 @@
         Input ??= new();
 
         // Ensure the user has gone through the username & password screen first
-        user = await SignInManager.GetTwoFactorAuthenticationUserAsync() ??
-            throw new InvalidOperationException("Unable to load two-factor authentication user.");
+        // No password step in progress (expired, or the page was opened directly): start again at sign-in.
+        var pending = await SignInManager.GetTwoFactorAuthenticationUserAsync();
+        if (pending is null) RedirectManager.RedirectTo("Account/Login");
+        user = pending!;
     }
 
     private async Task OnValidSubmitAsync()
     {
         var authenticatorCode = Input.TwoFactorCode!.Replace(" ", string.Empty).Replace("-", string.Empty);
-        var result = await SignInManager.TwoFactorAuthenticatorSignInAsync(authenticatorCode, RememberMe, Input.RememberMachine);
+        var result = await SignInManager.TwoFactorAuthenticatorSignInAsync(authenticatorCode, RememberMe, rememberClient: false);   // every sign-in needs the code
         var userId = await UserManager.GetUserIdAsync(user);
 
         if (result.Succeeded)
@@ -100,8 +96,5 @@
         [DataType(DataType.Text)]
         [Display(Name = "Authenticator code")]
         public string? TwoFactorCode { get; set; }
-
-        [Display(Name = "Remember this machine")]
-        public bool RememberMachine { get; set; }
     }
 }

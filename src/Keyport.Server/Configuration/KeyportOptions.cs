@@ -23,15 +23,26 @@ public sealed class KeyportOptions
     public string MasterKeyFile { get; set; } = "/run/secrets/keyport_master_key";
 
     public EdgeOptions Edge { get; set; } = new();
+    public ConnectionTestOptions ConnectionTest { get; set; } = new();
+    public AuthOptions Auth { get; set; } = new();
     public CaOptions Ca { get; set; } = new();
     public LogOptions Logs { get; set; } = new();
     public ProxyOptions Proxy { get; set; } = new();
+
+    /// <summary>
+    /// Extra secret types defined in configuration (in addition to the built-in ones and any JSON files in
+    /// {DataPath}/secret-types). See README "Secret types".
+    /// </summary>
+    public List<Keyport.Core.Secrets.Types.SecretTypeDefinition> SecretTypes { get; set; } = [];
 
     /// <summary>Environments in promotion order. Each gets its own listener port.</summary>
     public List<EnvironmentOptions> Environments { get; set; } = [];
 
     /// <summary>User name of the bootstrap administrator created on first start.</summary>
     public string BootstrapAdminUser { get; set; } = "admin";
+
+    /// <summary>Optional file (e.g. a container secret) holding the first admin's initial password. Otherwise one is generated into {DataPath}/bootstrap-admin.txt.</summary>
+    public string? BootstrapAdminPasswordFile { get; set; }
 }
 
 public sealed class EdgeOptions
@@ -53,6 +64,9 @@ public sealed class EdgeOptions
 
     /// <summary>Per-client rate limit on the secrets API.</summary>
     public int ApiRequestsPerMinute { get; set; } = 300;
+
+    /// <summary>Failed API authentications allowed per client IP per minute before that IP gets 429 (no key lookups, no audit writes).</summary>
+    public int FailedAuthPerMinute { get; set; } = 30;
 }
 
 public sealed class CaOptions
@@ -61,9 +75,53 @@ public sealed class CaOptions
     public int RootLifetimeDays { get; set; } = 3650;
     public int LeafLifetimeDays { get; set; } = 90;
 
+    /// <summary>
+    /// Limit a newly generated root to Keyport's own names (Name Constraints), so trusting it doesn't mean trusting it for
+    /// every website. Permitted: <c>Edge:HostNames</c> (with subdomains), <c>Edge:IpAddresses</c>, plus the lists below.
+    /// Decide these BEFORE the root is created: names added later must fall inside them. Existing roots are unchanged.
+    /// </summary>
+    public bool NameConstraints { get; set; } = true;
+    public List<string> PermittedDnsSuffixes { get; set; } = [];
+
+    /// <summary>
+    /// Also constrain IP addresses (to <c>Edge:IpAddresses</c> plus <see cref="PermittedIpRanges"/>). Off by default:
+    /// some older TLS stacks (e.g. LibreSSL 2.x, used by macOS's bundled Python 3.9) reject IP name constraints outright.
+    /// </summary>
+    public bool ConstrainIpAddresses { get; set; }
+    public List<string> PermittedIpRanges { get; set; } = [];
+
     /// <summary>Optional: PFX of an existing enterprise (intermediate) CA to issue from instead of a generated root.</summary>
     public string? ImportPfxPath { get; set; }
     public string? ImportPfxPasswordFile { get; set; }
+}
+
+/// <summary>Session limits for people signed in to the UI.</summary>
+public sealed class AuthOptions
+{
+    /// <summary>Sign out after this many minutes without activity (in any open tab).</summary>
+    public int IdleTimeoutMinutes { get; set; } = 30;
+
+    /// <summary>Every session ends this many hours after signing in, active or not.</summary>
+    public int AbsoluteSessionHours { get; set; } = 8;
+
+    /// <summary>Showing values in a protected environment needs a sign-in or authenticator code from the last N minutes.</summary>
+    public int StepUpMinutes { get; set; } = 15;
+}
+
+/// <summary>"Test connection" safeguards. The server makes these connections, so they are limited.</summary>
+public sealed class ConnectionTestOptions
+{
+    /// <summary>Turn the Test button off entirely.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Servers that may be tested: CIDR (<c>10.20.0.0/16</c>), IP, exact host or <c>*.corp.local</c>. Empty = any address
+    /// except loopback and Keyport's own ports. Link-local / cloud-metadata addresses are always refused.
+    /// </summary>
+    public List<string> AllowedTargets { get; set; } = [];
+
+    /// <summary>Tests each person may run per minute.</summary>
+    public int PerUserPerMinute { get; set; } = 10;
 }
 
 public sealed class ProxyOptions
@@ -75,6 +133,12 @@ public sealed class ProxyOptions
     /// Deliberately configuration-only: the UI cannot widen it.
     /// </summary>
     public List<string> AllowedUpstreams { get; set; } = [];
+
+    /// <summary>
+    /// Allow proxy routes on the admin port. Off by default and not recommended: anything an upstream serves there runs
+    /// as the admin UI's own origin (its scripts could drive the UI with a signed-in admin's session).
+    /// </summary>
+    public bool AllowAdminPort { get; set; }
 }
 
 public sealed class LogOptions

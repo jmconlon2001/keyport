@@ -62,7 +62,7 @@
                             </td>
                             <td data-label="Ports">
                                 <div class="d-flex flex-wrap gap-1 justify-content-end justify-content-md-start">
-                                    @foreach (var p in r.PortList){<span class="pill @(p == Environments.AdminPort ? "pill-accent" : "pill-muted")">@PortLabel(p)</span>}
+                                    @foreach (var p in r.PortList){<span class="pill @(IsServedPort(p) ? "pill-muted" : "pill-warning")" title="@(IsServedPort(p) ? null : "Not served: routes are blocked on the admin port")">@PortLabel(p)@(IsServedPort(p) ? "" : " (blocked)")</span>}
                                 </div>
                             </td>
                             <td data-label="Access">
@@ -83,9 +83,9 @@
                             <td data-label="Req 24h">@counts.GetValueOrDefault(r.PathPrefix).ToString("N0")</td>
                             <td class="td-actions text-end">
                                 <div class="d-inline-flex gap-1">
-                                    @if (r.Enabled && r.PortList.Contains(Environments.AdminPort))
+                                    @if (r.Enabled && r.PortList.FirstOrDefault(IsServedPort) is var openPort and > 0)
                                     {
-                                        <a class="btn btn-sm btn-ghost" href="@($"{r.PathPrefix}/")" target="_blank" title="Open"><i class="i i-link"></i></a>
+                                        <a class="btn btn-sm btn-ghost" href="@OpenUrl(openPort, r.PathPrefix)" target="_blank" rel="noopener noreferrer" title="Open"><i class="i i-link"></i></a>
                                     }
                                     <button class="btn btn-sm btn-ghost" title="Edit" @onclick="() => Edit(r)"><i class="i i-edit"></i></button>
                                     <button class="btn btn-sm btn-ghost" title="@(r.Enabled ? "Disable" : "Enable")" @onclick="() => Ask(r, Pending.Toggle)"><i class="i @(r.Enabled ? "i-x" : "i-check")"></i></button>
@@ -165,7 +165,7 @@
                             </div>
                         }
                     </div>
-                    <div class="form-text">The route returns 404 on every other port.</div>
+                    <div class="form-text">The route returns 404 on every other port.@if (!Options.Value.Proxy.AllowAdminPort){<span> Routes are never served on the admin port, so other applications can't share the admin UI's address.</span>}</div>
                 </div>
                 <div class="col-md-6">
                     <label class="form-label" for="pacc">Who can use it</label>
@@ -244,7 +244,13 @@
         counts = await ProxyRoutes.RequestCounts24hAsync(routes.Select(r => r.PathPrefix));
     }
 
-    private IEnumerable<int> AllPorts() => Environments.All.Select(e => e.Port).Prepend(Environments.AdminPort);
+    private IEnumerable<int> AllPorts() => Options.Value.Proxy.AllowAdminPort
+        ? Environments.All.Select(e => e.Port).Prepend(Environments.AdminPort)
+        : Environments.All.Select(e => e.Port);
+
+    private bool IsServedPort(int port) => port != Environments.AdminPort || Options.Value.Proxy.AllowAdminPort;
+
+    private string OpenUrl(int port, string prefix) => $"https://{new Uri(Nav.BaseUri).Host}:{port}{prefix}/";
 
     private string PortLabel(int port) =>
         port == Environments.AdminPort ? $"Admin :{port}" : Environments.ByPort(port) is { } e ? $"{e.Name} :{port}" : $":{port}";
@@ -261,7 +267,7 @@
     {
         editingId = null;
         tests = null;
-        editing = new SaveProxyRouteRequest { Ports = [Environments.AdminPort] };
+        editing = new SaveProxyRouteRequest { Ports = [Environments.All.First().Port] };
     }
 
     private void Edit(ProxyRoute r)

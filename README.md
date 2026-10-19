@@ -89,7 +89,8 @@ A self-contained, containerized service that stores and serves **database connec
 | Activity log | Every API request and every UI request or action, with status and latency. Retention is configurable per source. |
 | Health / status | `/health`, `/health/live`, `/health/ready` on every port; `/admin/api/status` and `/api/v1/status`; Status and Health pages in the UI |
 | Container | Distroless (chiseled) Ubuntu image, non-root UID 1654, read-only root filesystem, all capabilities dropped, no shell, built-in health check. Works with Podman and Docker. |
-| Tests | 109 automated tests (unit, plus integration tests that run the real server with real TLS on random ports) plus a scripted headless-browser end-to-end run |
+| Secret types | **Pluggable**: 18 built-in types (Oracle, SQL Server, PostgreSQL, MySQL, MongoDB, Redis, RabbitMQ, Kafka, OAuth client, LDAP, SFTP, SSH key, TLS certificate, AWS, Azure, logins, single values). Admins add their own types with a JSON file, no code (§9.2). |
+| Tests | 173 automated tests (unit, plus integration tests that run the real server with real TLS on random ports) plus a scripted headless-browser end-to-end run |
 
 ---
 
@@ -110,7 +111,9 @@ Keyport.sln
 ├── src/Keyport.Core/              Pure logic, no web dependencies
 │   ├── Crypto/  MasterKey · EnvelopeEncryptor · ApiKeys · PasswordGenerator
 │   ├── Pki/     CertificateAuthority (create root, issue/renew server certs)
-│   ├── Secrets/ SecretType · SecretMetadata · SecretPayload · ConnectionStringFactory · SecretNames (grants)
+│   ├── Secrets/ SecretType · SecretFields (SecretMetadata, SecretPayload) · ConnectionStringFactory · SecretNames (grants)
+│   │   ├── Types/      SecretTypeDefinition · SecretTypeRegistry (validation, rendering, promotion rules) · BuiltInTypes
+│   │   └── Renderers/  sqlserver · oracle · keyvalue · uri · template · pem-bundle
 │   └── Audit/   AuditChain (hash-chain computation/verification)
 ├── src/Keyport.Server/            ASP.NET Core host
 │   ├── KeyportApp.cs              Composition root: DI, Kestrel listeners, auth, pipeline, startup
@@ -121,7 +124,7 @@ Keyport.sln
 │   ├── Services/                        SecretService · ApiClientService · UserAdminService · AuditService · ProxyRouteService (+DbProxyConfigProvider) ·
 │   │                                    ActivityLogger (+writer, retention) · CertificateManager (+renewal) ·
 │   │                                    EnvironmentRegistry · AccessService · Health checks · StatusService ·
-│   │                                    ConnectionTester
+│   │                                    ConnectionTester (sqlserver/oracle/tcp) · SecretTypeLoader (config + /data/secret-types)
 │   ├── Data/                            EF Core DbContext, entities, migrations
 │   ├── Components/                      Blazor UI (Layout, Pages, Shared, Account/Identity pages)
 │   └── wwwroot/                         app.css design system, icons (inline SVG), JS helpers
@@ -178,19 +181,23 @@ The integration test `EveryKeyIsRejectedOnEveryOtherEnvironmentPort` tests all 1
 
 | Threat | Mitigation |
 |---|---|
-| Theft of the data volume or a database backup | All secret values are AES-256-GCM encrypted under per-version DEKs wrapped by the KEK, which is **not** on the volume. CA private keys and ASP.NET data-protection keys (which protect auth cookies) are also KEK-encrypted. |
+| Theft of the data volume or a database backup | All secret values are AES-256-GCM encrypted under per-version DEKs wrapped by the KEK, which is **not** on the volume. CA private keys, ASP.NET data-protection keys (which protect auth cookies), and users' **authenticator keys and recovery codes** are also KEK-encrypted. |
 | Database tampering (swap or replay ciphertexts) | AEAD with AAD `secret\|{id}\|{env}\|{version}`. Moved, replayed or altered ciphertexts fail to decrypt. Tested in `CiphertextIsBoundToItsRow`. |
 | Editing or deleting audit records | SHA-256 hash chain with dense IDs; any edit or gap breaks verification. Verified hourly (health check) and on demand. See §5.1 for limits. |
 | Cross-environment access by an app | §3 layers 1–6 |
 | Stolen API key | Scoped to one environment and to explicit grant patterns. Optional source-CIDR allow-list and expiry. Instant rotation or disable. Every use is logged with source IP. Rate limited. |
 | API key leakage from the server | Only SHA-256(key) is stored. The plaintext is shown once at creation or rotation. |
-| Brute force against API keys | 256-bit random secret. Lookup by public prefix plus constant-time compare. Rate limiting. Failures audited. |
-| Phishing or credential stuffing of users | Mandatory MFA (TOTP or passkey). Lockout after 5 failures (15 min). Login rate limit of 10/min/IP. Minimum 12-character passwords. |
-| Session theft | `__Host-` cookies (Secure, HttpOnly, SameSite=Strict, host-only), 8 h sliding expiry. Security stamp re-validated every minute, so disabling a user or changing roles takes effect within 60 s. |
-| XSS / clickjacking / CSRF | Strict CSP (`script-src 'self'`, no inline scripts, no third-party origins), `X-Frame-Options: DENY`, `frame-ancestors 'none'`, antiforgery tokens on all forms, SameSite=Strict |
+| Brute force against API keys / unauthenticated floods | 256-bit random secret. Lookup by public prefix plus constant-time compare. Per-key rate limit, **plus a per-IP limit on failed authentications** (default 30/min, then `429` with no key lookup). Failures go to the activity log every time and to the audit trail once per IP, client and reason per minute (with a count), so floods can't bury real events. |
+| Phishing or credential stuffing of users | Mandatory MFA (TOTP or passkey) on **every** sign-in (no "remember this machine"). Until a new account has changed its password and enrolled MFA, it can reach only the `/Account` pages: everything else (pages, Blazor hub, admin API) is refused, and the services treat it as anonymous. Lockout after 5 failures (15 min). Login rate limit of 10/min/IP. Minimum 12-character passwords. |
+| Session theft | `__Host-` cookies (Secure, HttpOnly, SameSite=Strict, host-only). **30-minute idle timeout** (open tabs included) and an **8-hour absolute limit**. Security stamp re-validated every minute (cookies and open tabs), so disabling a user or changing roles takes effect within 60 s. Showing values in a protected environment needs a sign-in or an **authenticator code from the last 15 minutes** (step-up). |
+| XSS / clickjacking / CSRF | Strict CSP (`script-src 'self'`, no inline scripts, no third-party origins), `X-Frame-Options: DENY`, `frame-ancestors 'none'`, antiforgery tokens on all forms, SameSite=Strict. Pages on Keyport's other ports are "same-site", so the admin port also refuses any state-changing request or Blazor hub connection whose `Origin` isn't the admin origin itself. |
 | Downgrade / MITM | HTTPS only for every authenticated surface; TLS 1.2/1.3 only; HSTS. HTTP :8080 serves only the public CA certificate and health. |
 | Open redirect | The HTTP→HTTPS redirect only targets configured host names, never an arbitrary `Host` header. |
-| Proxy routes abused for SSRF or to expose services | Admin-only, reason required, audited. Ports must be chosen explicitly (404 elsewhere). Link-local and cloud-metadata upstreams are always refused. An optional **configuration-only** allow-list (`Proxy:AllowedUpstreams`) restricts upstream hosts. Paths owned by Keyport cannot be shadowed. |
+| Proxy routes abused for SSRF or to expose services | Admin-only, reason required, audited. Ports must be chosen explicitly (404 elsewhere). Link-local and cloud-metadata upstreams are always refused, and loopback unless allow-listed, **checked when connecting** (names resolved, so DNS changes can't redirect a route). An optional **configuration-only** allow-list (`Proxy:AllowedUpstreams`) restricts upstream hosts. Paths owned by Keyport (every UI page, automatically) cannot be shadowed. |
+| A proxied upstream stealing sessions or keys | Browsers send cookies to every port of a host, so every route **strips Keyport's cookies and API keys** from requests and **drops `Set-Cookie` for Keyport's cookie names** from responses. Routes are **never served on the admin port** (they would share the admin UI's origin) unless `Proxy:AllowAdminPort` is set, and the admin port always keeps the strict CSP. |
+| "Test connection" used to leak a password or scan the network | A saved secret is tested **server-side with its stored settings only** (never values in the edit form), with a reason in protected environments. Targets are resolved and checked: link-local/metadata always refused; loopback and Keyport's own ports refused unless `ConnectionTest:AllowedTargets` names them; optional allow-list; 10 tests/min per person; failures reported as a category, not raw driver text. |
+| Bootstrap password exposure | The first admin's one-time password is never logged. It is written to `/data/bootstrap-admin.txt` (mode 0600), read with `--bootstrap-password`, and deleted once changed; or supply it with `BootstrapAdminPasswordFile`. |
+| Health endpoints as reconnaissance | Unauthenticated `/health*` returns only the overall status and the names of failing checks. Details are for signed-in Admins and Auditors. |
 | Shoulder-surfing / over-exposure in the UI | Values are masked by default. Reveal needs a confirmation (and a reason in protected environments), auto-hides after 30 s, and is audited. Copy-to-clipboard is audited. |
 | Insider misuse | Per-environment least privilege. Protected-environment reasons are captured in the audit trail. Auditor role for read-only oversight. Every UI page view and action is in the activity log. |
 | Container escape / lateral movement | Distroless image (no shell or package manager), non-root, read-only root FS, `cap_drop: ALL`, `no-new-privileges` |
@@ -246,7 +253,8 @@ Starting with the old key afterwards is refused ("encrypted with master key(s) �
 <sub>Diagram source: [`docs/diagrams/tls-ca.mmd`](docs/diagrams/tls-ca.mmd)</sub>
 
 - **Automatic**: issued on first start; re-issued at startup if the SANs change. A background job checks hourly and **renews at two-thirds of its lifetime** (day 60 of 90). New handshakes use the new certificate immediately; open connections are unaffected and no restart is needed. Admins can force a renewal from the Certificates page.
-- **Trust distribution**: clients trust the root once. It can be downloaded from `http://<host>:8080/ca.crt` (bootstrap) or from the Certificates page. **Verify its SHA-256 fingerprint**, which is printed in the startup log and shown in the UI, before installing.
+- **Name Constraints**: a generated root is limited to Keyport's own DNS names (`Edge:HostNames` with their subdomains, plus `Ca:PermittedDnsSuffixes`). Installing it does **not** mean trusting it for every website. IP addresses can be constrained too (`Ca:ConstrainIpAddresses`, `Ca:PermittedIpRanges`), but this is off by default: some older TLS stacks (e.g. LibreSSL 2.x, used by the Python 3.9 bundled with macOS) reject certificates under a root with IP constraints. Verified working: .NET, curl, OpenSSL, Chrome, and that Python 3.9 (DNS-only). Decide the names before first start: a name added later must fall inside the constraints. If it doesn't, the certificates health check turns Degraded and explains why. To change the constraints, create a new CA (stop, move `/data/ca` aside, start, redistribute `root.crt`). Roots created by earlier versions have no constraints until replaced this way.
+- **Trust distribution**: clients trust the root once. It can be downloaded from `http://<host>:8080/ca.crt` (bootstrap) or from the Certificates page. **Verify its SHA-256 fingerprint** before installing. It is printed in the startup log, shown on the sign-in and Certificates pages, and included in the developer hand-over instructions.
 - **Enterprise CA**: set `Ca:ImportPfxPath` (+ `ImportPfxPasswordFile`) to issue from an existing enterprise intermediate CA (RSA or ECDSA) that clients already trust. The service then never generates its own root.
 - Leaf certificates never outlive their issuer. TLS 1.2 and 1.3 only.
 
@@ -258,10 +266,10 @@ Starting with the old key afterwards is refused ("encrypted with master key(s) �
 |---|---|
 | Password policy | ≥ 12 characters, upper, lower, digit, symbol, ≥ 6 unique characters |
 | Lockout | 5 failed attempts → 15 minutes. Admins can unlock. |
-| MFA | **Mandatory.** Users without an authenticator app or passkey are redirected to enrol before any page loads (`AccountEnforcementMiddleware`). TOTP is shown as a QR code rendered on the server (no third-party JS); recovery codes are issued on enrolment. Passkeys (WebAuthn) are supported for phishing-resistant sign-in. |
+| MFA | **Mandatory, every sign-in.** Users without an authenticator app or passkey are redirected to enrol, and every other request is refused, until they do (`AccountEnforcementMiddleware`, and `AccessService` treats them as anonymous). TOTP is shown as a QR code rendered on the server (no third-party JS); recovery codes are issued on enrolment. Passkeys (WebAuthn) are supported for phishing-resistant sign-in. |
 | First sign-in | Admin-created and reset accounts get a random temporary password (shown once) and **must** change it before doing anything else. |
 | Self-registration / password reset by email | Disabled. Accounts are created and reset by Admins only. |
-| Sessions | 8 h sliding. Security stamp re-validated every 60 s. Role or environment changes, disable and MFA reset all rotate the stamp, which ends existing sessions. |
+| Sessions | 30 min idle (open tabs keep it alive only while someone is using them), 8 h absolute. Security stamp re-validated every 60 s in cookies **and** open tabs. Role or environment changes, disable and MFA reset all rotate the stamp, which ends existing sessions. Step-up code for showing values in protected environments after 15 min. All configurable under `Keyport:Auth`. |
 
 **Applications (env ports)**: `Authorization: Bearer sm_…` (or `X-Api-Key`). A key is accepted only if **all** of these hold:
 
@@ -283,14 +291,14 @@ Failure responses are deliberately generic (`401 Invalid or missing API key for 
 | Create, update, rollback or delete secrets | all envs | – | ✓ | – |
 | Promote to the next environment | ✓ | – | needs Editor on the target | – |
 | Manage API clients (create, rotate, disable, delete) | all envs | – | ✓ | view |
-| Test database connections | ✓ | – | ✓ | ✓ (using stored values) |
+| Test connections (saved secrets: stored settings only, server-side) | ✓ | – | ✓ | ✓ |
 | Audit trail and activity log (view, export, verify) | ✓ | ✓ | – | – |
 | Users and roles, certificates | ✓ | – | – | – |
 | Status and health pages | ✓ | ✓ | ✓ | ✓ |
 
 Authorization is enforced inside the services (`SecretService`, `ApiClientService`, `UserAdminService`), not only by hiding UI elements, so a crafted SignalR call cannot bypass it. The integration test `EnvironmentScopedUsersCannotCrossEnvironments` covers this.
 
-**Protected environments** (Upgrade and Prod by default; `Environments[].Protected`): every reveal, create, update, rollback, delete and client change requires a free-text **reason** (e.g. a change ticket), which is stored in the audit trail. The UI shows a warning banner.
+**Protected environments** (Upgrade and Prod by default; `Environments[].Protected`): every reveal, connection test, create, update, rollback, delete and client change requires a free-text **reason** (e.g. a change ticket), which is stored in the audit trail. Showing values also needs a recent sign-in or authenticator code (step-up). The UI shows a warning banner.
 
 ### 4.6 Web and container hardening
 
@@ -298,7 +306,7 @@ Authorization is enforced inside the services (`SecretService`, `ApiClientServic
   - All responses: `Content-Security-Policy` (admin port), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Permissions-Policy`, `Cross-Origin-Opener-Policy`, `Cross-Origin-Resource-Policy`, HSTS on HTTPS.
   - The `Server` header is removed.
   - Secret and API responses also get `Cache-Control: no-store`.
-- **Limits**: request body ≤ 1 MB, headers ≤ 32 KB, API rate limit per key (default 300/min, `429` when exceeded), login rate limit 10/min/IP.
+- **Limits**: request body ≤ 1 MB, headers ≤ 32 KB, API rate limit per key (default 300/min, `429` when exceeded), failed API authentications per IP (default 30/min), login rate limit 10/min/IP, connection tests 10/min per person, 100 ms timeout on type-definition patterns.
 - **No third-party assets**: icons are inline SVG masks in `app.css`, and Bootstrap is vendored. The UI works fully offline and the CSP allows only `'self'`.
 - **Container**: `mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled-extra` (distroless; `-extra` adds ICU/tzdata, which SqlClient needs), UID 1654, `read_only: true`, `tmpfs: /tmp`, `cap_drop: [ALL]`, `no-new-privileges`. The image is about 230 MB.
 
@@ -401,9 +409,9 @@ Connection strings are built by the drivers' own builders (`SqlConnectionStringB
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/connections/{name}` | Connection string plus components, for Oracle or SQL Server secrets |
-| GET | `/credentials/{name}` | Username and password (basic auth, service account, or a connection's credentials) |
-| GET | `/secrets/{name}` | Any secret type (generic shape) |
+| GET | `/connections/{name}` | Connection string plus components, for any type that produces one (Oracle, SQL Server, PostgreSQL, MySQL, MongoDB, Redis, RabbitMQ, custom types with a `connectionString` output) |
+| GET | `/credentials/{name}` | Username and password, for any type that has both fields |
+| GET | `/secrets/{name}` | Any secret type: every field under `fields`, every rendered output under `outputs` |
 | GET | `/secrets?prefix=billing/` | Names this client may read (no values) |
 | GET | `/status` | This environment's status plus the calling client's name, key expiry and grants |
 
@@ -431,6 +439,17 @@ curl --cacert keyport-ca.crt \
 ```json
 // GET /credentials/batch/svc-account
 { "name": "batch/svc-account", "environment": "Prod", "type": "ServiceAccount", "username": "svc_batch", "password": "…", "domain": "CORP", "url": null, "version": 2 }
+```
+
+```json
+// GET /secrets/pulsar-notify/redis-queue  (any type; old clients can keep using value/username/password/connectionString)
+{
+  "name": "pulsar-notify/redis-queue", "environment": "Prod", "type": "RedisConnection",
+  "value": null, "username": "pulsar-worker", "password": "…", "connectionString": "rediss://pulsar-worker:…@pulsar-redis-prod.nimbus.internal:6380",
+  "version": 1,
+  "fields": { "host": "pulsar-redis-prod.nimbus.internal", "port": "6380", "tls": "true", "username": "pulsar-worker", "password": "…" },
+  "outputs": { "connectionString": "rediss://pulsar-worker:…@pulsar-redis-prod.nimbus.internal:6380" }
+}
 ```
 
 **Status codes**
@@ -468,6 +487,7 @@ The UI is desktop-first and responsive: the sidebar becomes a slide-out drawer a
 | Secret editor | Guided, numbered steps in plain language: kind of secret (with descriptions), optional folder plus a free-text name converted to a safe name automatically (with a "saved as" preview and duplicate check), field help with examples, rarely-needed driver settings under *Advanced settings*, a live "Still needed: …" checklist with Save disabled until complete, password generator, test connection, masked preview of what the application receives. Saved secrets show a **"Next step: give an application access"** prompt, the list of applications that can read the secret, audited *Show* (30 s auto-hide) and copy, version history with restore, *Copy to…* another environment, password-change reminder, delete. |
 | Compare environments | Matrix of secret names by Dev/Test/Upgrade/Prod with version numbers, to find gaps before a release (no values) |
 | Applications (API clients) | Each row shows the key prefix, expiry (**never** by default) and **key age** ("4 months old · issued 18 Jun 2026"; keys over a year old are highlighted with "consider issuing a new key"). Add an application and choose **which secrets it can read from a picker of what exists** (everything, a folder, or individual secrets, shown as a tree with counts and "already covered" hints). This can be started straight from a secret with that secret pre-selected. After creation a **hand-over** panel shows the key once, plus copy-ready setup instructions for the developer (address, the exact requests to make, CA download) that do not contain the key. Edit access, issue a new key, turn off or on, delete. Network restriction is under *Advanced*. |
+| Secret types | Every kind of secret Keyport knows: its fields, which are encrypted, which are copied to other environments, what applications receive, and where the type came from (built-in, configuration or a file) |
 | Help & guide | Step-by-step "setting up a secret for someone", common tasks (password changed, copy to Prod, app stopped working, key lost), a glossary in plain words, and good habits |
 | Status | Listeners, traffic, latency percentiles, jobs, retention, TLS |
 | Health | Live health checks with details (auto refresh) |
@@ -489,17 +509,28 @@ Configuration comes from `appsettings.json` and can be overridden by environment
 | `Keyport:DataPath` | `/data` | Volume for the database, CA and key ring |
 | `Keyport:MasterKeyFile` | `/run/secrets/keyport_master_key` | KEK file. `KEYPORT_MASTER_KEY_FILE` overrides it. |
 | `Keyport:BootstrapAdminUser` | `admin` | First administrator account name |
+| `Keyport:BootstrapAdminPasswordFile` | – | Supply the first admin's initial password from a file (e.g. a container secret) instead of generating one |
 | `Keyport:Edge:HttpPort` | `8080` | Bootstrap HTTP port (`0` disables it) |
 | `Keyport:Edge:AdminPort` | `8443` | Admin UI / admin API port |
 | `Keyport:Edge:BindAddress` | `0.0.0.0` | Default bind address (`*`/`::` for IPv6 any) |
 | `Keyport:Edge:HostNames[]` | `localhost, keyport` | DNS names placed in the TLS certificate. **Set these to the names clients use.** |
 | `Keyport:Edge:IpAddresses[]` | `127.0.0.1` | IP SANs |
 | `Keyport:Edge:ApiRequestsPerMinute` | `300` | Rate limit per API key |
+| `Keyport:Edge:FailedAuthPerMinute` | `30` | Failed API authentications per client IP per minute before `429` |
+| `Keyport:Auth:IdleTimeoutMinutes` | `30` | Sign out after this long without activity |
+| `Keyport:Auth:AbsoluteSessionHours` | `8` | Every session ends this long after signing in |
+| `Keyport:Auth:StepUpMinutes` | `15` | Showing values in a protected environment needs a sign-in or authenticator code this recent |
+| `Keyport:ConnectionTest:Enabled` | `true` | Turn "Test connection" off entirely |
+| `Keyport:ConnectionTest:AllowedTargets[]` | empty | Servers that may be tested (CIDR, IP, host, `*.suffix`). Empty = anything except loopback, Keyport's own ports and link-local/metadata |
+| `Keyport:ConnectionTest:PerUserPerMinute` | `10` | Tests per person per minute |
 | `Keyport:Ca:CommonName` | `Keyport Root CA` | Root CA subject |
 | `Keyport:Ca:RootLifetimeDays` | `3650` | Root lifetime |
 | `Keyport:Ca:LeafLifetimeDays` | `90` | Server certificate lifetime (renewed at 2/3) |
 | `Keyport:Ca:ImportPfxPath` | – | Use an enterprise CA instead of a generated root |
 | `Keyport:Ca:ImportPfxPasswordFile` | – | Password file for the PFX |
+| `Keyport:Ca:NameConstraints` | `true` | Limit a newly generated root to Keyport's own names (§4.3) |
+| `Keyport:Ca:PermittedDnsSuffixes[]` | empty | Extra DNS names a new root may vouch for, with subdomains (set before first start) |
+| `Keyport:Ca:ConstrainIpAddresses` / `PermittedIpRanges[]` | `false` / empty | Also constrain IPs to `Edge:IpAddresses` plus these ranges. Off by default for compatibility with older TLS clients. |
 | `Keyport:Logs:ApiLogRetentionDays` | `90` | API activity retention (0 = forever) |
 | `Keyport:Logs:UiLogRetentionDays` | `90` | UI activity retention (0 = forever) |
 | `Keyport:Logs:AuditRetentionDays` | `0` | Audit retention (0 = forever) |
@@ -509,7 +540,8 @@ Configuration comes from `appsettings.json` and can be overridden by environment
 | `Keyport:Environments[i]:Color` | green/blue/amber/red | UI accent |
 | `Keyport:Environments[i]:Protected` | Upgrade, Prod = `true` | Require reasons and show a warning banner |
 | `Keyport:Environments[i]:BindAddress` | – | Bind this environment to a specific interface |
-| `Keyport:Proxy:AllowedUpstreams[]` | empty | Optional allow-list for UI-managed proxy upstreams (§9.1) |
+| `Keyport:Proxy:AllowedUpstreams[]` | empty | Optional allow-list for UI-managed proxy upstreams (§9.1). Also needed to proxy to loopback. |
+| `Keyport:Proxy:AllowAdminPort` | `false` | Allow proxy routes on the admin port. **Not recommended**: the upstream would share the admin UI's origin. |
 | `ReverseProxy:Routes / Clusters` | empty | Optional proxy routes defined in configuration (§9.1) |
 
 The order of `Environments` is the **promotion order** (Dev → Test → Upgrade → Prod).
@@ -520,17 +552,23 @@ The order of `Environments` is the **promotion order** (Dev → Test → Upgrade
 
 Keyport can publish internal services through its own TLS edge, using YARP (Microsoft's reverse proxy). Proxied requests get the same certificate, security headers, port gate and activity logging as everything else.
 
+**Security boundaries for proxied services:**
+- Routes are served on **environment ports only**. The admin port is refused (and ignored for existing routes, with a startup warning), because anything served there shares the admin UI's origin.
+- Keyport's own cookies (`__Host-kp-*`, `.AspNetCore.*`, `Identity.*`) and API keys (`Authorization: Bearer kp_…`, `X-Api-Key`) are **removed** before a request reaches the upstream; the upstream's own cookies and credentials pass through.
+- An upstream can't set Keyport's cookies: those `Set-Cookie` headers are dropped.
+- "Signed-in users" routes send people to the admin port to sign in, then work on the environment port with the same session.
+
 **Managing routes in the UI (Administration → Reverse proxy, Admin only)**
 
 | Field | Meaning |
 |---|---|
 | Name | Unique slug (`grafana`) |
-| Path prefix | `/grafana`: requests to `/grafana` and everything below it are forwarded. Top-level paths used by Keyport (`/api`, `/admin`, `/Account`, `/secrets`, `/health`, `/_blazor`, …) are refused. |
+| Path prefix | `/grafana`: requests to `/grafana` and everything below it are forwarded. Top-level paths used by Keyport (`/api`, `/admin`, `/Account`, `/health`, `/_blazor`, and every UI page automatically) are refused. |
 | Upstream URL(s) | One per line. Several upstreams are load-balanced (PowerOfTwoChoices, RoundRobin, LeastRequests, Random, FirstAlphabetical). |
-| Serve on ports | Admin port and/or environment ports. The route returns **404 on every port not selected**. |
+| Serve on ports | Environment ports (the admin port only with `Proxy:AllowAdminPort`). The route returns **404 on every port not selected**. |
 | Who can use it | Signed-in users (MFA) · Admins & Auditors · Admins only · Anyone who can reach the port |
 | Strip prefix | The upstream sees `/` rather than `/grafana/` |
-| Relax CSP | Omit the strict Content-Security-Policy for this route only (many proxied web apps need inline scripts); all other security headers stay |
+| Relax CSP | Kept for compatibility. Environment ports don't add Keyport's CSP to proxied pages, and the admin port always does. |
 | Health check path | Optional active probe every 30 s; the destination's health is shown on the page |
 | Reason | Required. Every create, update, enable/disable, delete and upstream test goes to the audit trail (`proxy.*`). |
 
@@ -547,18 +585,80 @@ Keyport can publish internal services through its own TLS edge, using YARP (Micr
 "Keyport": { "Proxy": { "AllowedUpstreams": [ "*.corp.local", "grafana.internal", "10.20.0.0/16" ] } }
 ```
 
-Entries can be an exact host, a `*.domain` wildcard, or a CIDR (matched against IP-literal upstreams). If the list is empty, any upstream is allowed except link-local and cloud-metadata addresses (169.254.0.0/16, fe80::/10, `metadata.google.internal`), which are always refused. The list can't be changed from the UI, so a compromised admin session cannot widen it.
+Entries can be an exact host, a `*.domain` wildcard, an IP, or a CIDR. Upstream names are resolved **when the proxy connects** and every address is checked, so a DNS change can't point a route somewhere forbidden. If the list is empty, any upstream is allowed except:
+- link-local and cloud-metadata addresses (169.254.0.0/16, fe80::/10, `metadata.google.internal`): always refused, even if listed
+- loopback (this server itself): refused unless listed The list can't be changed from the UI, so a compromised admin session cannot widen it.
 
 **Routes from configuration (infrastructure as code)** still work and appear read-only in the UI. Each must name its ports in `Metadata.Ports`:
 
 ```json
 "ReverseProxy": {
-  "Routes": { "docs": { "ClusterId": "docs", "Match": { "Path": "/docs/{**rest}" }, "AuthorizationPolicy": "default", "Metadata": { "Ports": "8443" } } },
+  "Routes": { "docs": { "ClusterId": "docs", "Match": { "Path": "/docs/{**rest}" }, "AuthorizationPolicy": "default", "Metadata": { "Ports": "9444" } } },
   "Clusters": { "docs": { "Destinations": { "d1": { "Address": "http://docs-internal:8080/" } } } }
 }
 ```
 
 **Putting Keyport behind your own proxy** (F5, nginx, an application gateway) is a different setup. Use **TCP/TLS passthrough per port**: the environment is decided by the port the connection arrives on, and `X-Forwarded-*` headers are deliberately ignored.
+
+### 9.2 Secret types
+
+Each kind of secret is a **definition**, not code: its fields, which fields are encrypted, rules (required, pattern, options), help text, and the outputs applications receive. The editor, validation, masked preview, *Copy to…*, *Test* and the API are generic engines that read those definitions. Signed-in users can browse them on the **Secret types** page.
+
+**Where definitions come from** (merged at startup, keys must be unique):
+1. Built-in (code): the original five plus PostgreSQL, MySQL/MariaDB, MongoDB, Redis, RabbitMQ, Kafka SASL, OAuth2 client, LDAP bind, SFTP, SSH key, TLS certificate, AWS access key and Azure service principal.
+2. Configuration: `Keyport:SecretTypes[]` (same shape as the JSON below).
+3. Files: every `*.json` in `<DataPath>/secret-types/` (one object or an array; comments and trailing commas allowed).
+
+Every definition is checked at startup. An invalid one (unknown renderer, a field referenced in a template that doesn't exist, a bad pattern, a duplicate key, …) **stops startup with a message naming the file and field**, rather than failing later at request time.
+
+**Example** ([docs/secret-types/elasticsearch.json](docs/secret-types/elasticsearch.json)):
+
+```json
+{
+  "key": "Elasticsearch",
+  "title": "Elasticsearch cluster",
+  "description": "Address and API key for an Elasticsearch cluster.",
+  "category": "database",
+  "icon": "database",
+  "color": "#00bfb3",
+  "fields": [
+    { "key": "url", "label": "Cluster address", "kind": "Url", "required": true, "placeholder": "https://search.corp.local:9200" },
+    { "key": "apiKey", "label": "API key (encoded)", "kind": "Password", "sensitive": true, "required": true },
+    { "key": "index", "label": "Default index", "advanced": true }
+  ],
+  "outputs": [
+    { "key": "authorizationHeader", "label": "Authorization header", "renderer": "template", "settings": { "template": "ApiKey {{apiKey}}" } }
+  ],
+  "tester": "tcp"
+}
+```
+
+**Type properties**
+
+| Property | Meaning |
+|---|---|
+| `key` | Stored with each secret; never change it once secrets exist. 2–40 letters, digits, `-`, `_`. |
+| `title`, `description` | Shown in the type picker |
+| `category` | `database`, `messaging`, `login`, `key`, `certificate`, `cloud`, `other` (groups the picker) |
+| `icon`, `color` | Icon name from the UI set and an accent color |
+| `fields[]` | See below |
+| `outputs[]` | `{ key, label, renderer, settings }`. An output named `connectionString` makes the type available on `/connections`. |
+| `requireOneOf` | Groups of fields where at least one must be filled, e.g. `[["password","privateKey"]]` |
+| `tester` | `tcp` (can the server reach host:port; login not checked), `sqlserver`, `oracle`, or omitted |
+
+**Field properties**: `key` (camelCase), `label`, `kind` (`Text`, `Number`, `Port`, `Bool`, `Select`, `Password`, `Multiline`, `Url`, `Host`, `Pem`), `sensitive` (encrypted in the payload; otherwise stored as clear metadata), `required`, `requiredUnless[]`, `disabledWhen` (a Bool field), `help`, `placeholder`, `default`, `options[]` (Select), `advanced`, `copyOnPromote` (sensitive fields are **not** copied to other environments unless this is set), `generate` (password generator), `pattern` (regex), `min`, `max`, `recommended`.
+
+**Renderers** (all escape values for their format):
+
+| Renderer | Settings | Use |
+|---|---|---|
+| `sqlserver`, `oracle` | – | The driver's own connection string builders |
+| `keyvalue` | `map` (`"Host=host;Port=port;…"`: output key = field key), `extraField` | ADO.NET-style strings (PostgreSQL, MySQL, ODBC) |
+| `uri` | `scheme`, `tlsScheme` + `tlsField`, `host`, `hostIsList`, `port`, `path`, `user`, `password`, `query` | URLs; user, password and path are percent-encoded |
+| `template` | `template` with `{{field}}` or `{{field\|encoder}}`; encoders `url`, `json`, `base64`, `quoted` | Anything else (properties files, headers, env files) |
+| `pem-bundle` | `fields` (in order), `certificateField` + `keyField` | Concatenated PEM; checks the certificate parses and matches the key |
+
+**Compatibility.** No database migration: the type key is the same string column, and field values are the same JSON objects as before (older rows with numbers or booleans load unchanged). The original five types keep their exact keys, fields and connection strings, and `/connections` and `/credentials` keep their response shapes. If a type's definition is later removed, its secrets are still stored and served; the UI shows them read-only as an unknown type.
 
 ---
 
@@ -570,14 +670,15 @@ Entries can be an exact host, a `*.domain` wildcard, or a CIDR (matched against 
 # 1. Master key: keep a secure, separate backup of this file
 mkdir -p secrets && openssl rand -base64 32 > secrets/keyport_master_key && chmod 644 secrets/keyport_master_key && chmod 700 secrets
 
-# 2. Set the DNS names clients will use in compose.yaml (Keyport__Edge__HostNames__N)
+# 2. Set the DNS names clients will use in compose.yaml (Keyport__Edge__HostNames__N).
+#    Do this before the first start: the generated CA is limited to these names (§4.3).
 
 # 3. Build and start
 podman build --format docker -t localhost/keyport:latest .   # --format docker keeps the HEALTHCHECK
 podman compose up -d
 
-# 4. First sign-in: get the one-time admin password
-podman logs keyport 2>&1 | grep -A3 "Bootstrap administrator"
+# 4. First sign-in: get the one-time admin password (never written to the log; deleted once changed)
+podman exec keyport dotnet Keyport.Server.dll --bootstrap-password
 
 # 5. Trust the CA (verify the fingerprint against the log or Certificates page first)
 curl -s http://localhost:8080/ca.crt -o keyport-ca.crt
@@ -595,8 +696,9 @@ openssl x509 -in keyport-ca.crt -noout -fingerprint -sha256
 3. Check that `HostNames`/`IpAddresses` match the names clients use. The Certificates page shows the SANs.
 4. Distribute the CA certificate to clients' trust stores, or import your enterprise CA (§4.3).
 5. Restrict firewall access: :8443 from admin networks, each :94xx from its environment's networks, :8080 as needed for bootstrap.
-6. Grant Viewer/Editor per environment, and Auditor to your security team.
-7. Configure log retention to meet your policy, and schedule an export of the audit trail to your SIEM.
+6. Optional hardening: set `ConnectionTest:AllowedTargets` to your database subnets, and `Proxy:AllowedUpstreams` if you use the reverse proxy.
+7. Grant Viewer/Editor per environment, and Auditor to your security team.
+8. Configure log retention to meet your policy, and schedule an export of the audit trail to your SIEM.
 
 ### 10.3 Try it with demo data
 
@@ -688,7 +790,7 @@ openssl rand -base64 32 > .localdata/master.key       # dev key (gitignored)
 ASPNETCORE_ENVIRONMENT=Development dotnet run --project src/Keyport.Server
 # → https://localhost:8443  (dev data in ./.localdata)
 
-dotnet test                                           # 109 tests, about 20 s
+dotnet test                                           # 173 tests, about 25 s
 
 dotnet ef migrations add <Name> -p src/Keyport.Server -o Data/Migrations   # after model changes
 docs/diagrams/render.sh                               # re-render README diagrams after editing docs/diagrams/*.mmd
@@ -703,6 +805,8 @@ docs/diagrams/render.sh                               # re-render README diagram
 | Cryptography | round trip; fresh DEK and nonce per encryption; tampered ciphertext fails; **ciphertext moved to another environment fails**; wrong KEK fails; re-wrap; key file formats |
 | API keys / passwords / names | format and verification, malformed keys, generated password strength and connection-string safety, name validation and path-traversal rejection, grant matching |
 | Connection strings | SQL Server and Oracle escaping of hostile passwords, Integrated Security, EZConnect vs TNS/SID, extra options, masked preview never leaks |
+| **Security hardening** | proxy never forwards Keyport cookies or API keys and drops upstream `Set-Cookie` for them; admin port refused for proxy routes (and ignored for stored ones); cross-origin POSTs and Blazor hub connections refused; saved-secret tests use stored settings only and need a reason in Prod; incomplete accounts (password change or MFA pending) can reach only `/Account`, and services treat them as anonymous; failed-auth throttle and audit de-duplication; connection-test target rules (loopback, metadata, override strings, TNS descriptors, allow-list, per-person limit); upstream guard; anonymous health returns status only; name-constrained root rejects other names in the platform chain builder; absolute session and step-up rules; bootstrap password file is 0600; ReDoS timeout; authenticator keys and recovery codes encrypted (and legacy rows migrated); **KEK rotation end to end** including authenticator tokens |
+| Secret types | pinned output for the original types; key/value, URI (percent-encoding), template encoders and Kafka JAAS quoting with hostile values; TLS certificate/key match and mismatch; required, pattern and one-of rules; promotion copies only copy-marked fields; masked previews of **every** type never show sensitive values; invalid definitions rejected with clear messages; legacy JSON loads; the sample in `docs/secret-types` loads; a **file-defined type end to end** (create, reveal, API outputs, `/connections`, promotion); PostgreSQL, SFTP and AWS served by the API |
 | Audit chain | intact chain, edited row detected, deleted row detected, field-boundary shift detected |
 | CA | chain to root, SANs, server-auth EKU, leaf never outlives issuer, two-thirds renewal threshold, PEM/PKCS#8 round trip |
 | **Reverse proxy (real upstream)** | served only on selected ports; prefix stripping; sign-in required for protected routes; live update, disable/enable and delete; CSP opt-out; reserved paths, link-local/metadata, allow-list, scheme and credential validation; Admin-only with reason; upstream test; **routes persist across a server restart** |
@@ -740,9 +844,10 @@ docs/diagrams/render.sh                               # re-render README diagram
 | **Single instance** (SQLite; audit-chain writes serialized in-process; in-memory rate limits) | No active-active HA; restart means a short outage | Switch EF provider to SQL Server or Postgres; replace the in-process audit lock with a DB sequence/lock; run 2+ replicas behind a TCP load balancer. Clients should cache values to ride through restarts. |
 | Audit chain cannot prove the newest records weren't truncated by a DB-level attacker | Detects edits and deletions *within* the chain, not tail truncation | Scheduled export to SIEM or WORM storage; periodically publish the head hash externally |
 | KEK is a file | Anyone with both the volume and the key file can decrypt | Wrap the KEK with a KMS/HSM (Azure Key Vault, AWS KMS, HashiCorp Vault Transit, PKCS#11) |
-| TOTP authenticator secrets use Identity's default storage (not KEK-encrypted) | A DB-only compromise could enable TOTP cloning (the password is still required) | Enable Identity personal-data protection with a KEK-backed `ILookupProtector` |
-| "Test connection" opens network connections from the server to admin-entered hosts | Editors can probe reachability from the server's network (SSRF-like) | Restrict to an allow-list of DB subnets, or disable through configuration |
 | No CRL/OCSP for the internal CA | A compromised server key stays valid until expiry (≤ 90 days) | Shorten `LeafLifetimeDays`; use an enterprise CA with revocation |
+| Roots created before Name Constraints were added are unconstrained | Clients trusting such a root would accept it for any name | Create a new CA (§4.3) and redistribute `root.crt` |
+| Database-driver connection tests (SQL Server, Oracle) resolve the host again inside the driver | A DNS change between Keyport's check and the driver's connect could redirect one test | Use `ConnectionTest:AllowedTargets` with CIDRs; the `tcp` tester connects to the checked address |
+| Passkey-only accounts can't answer the step-up code prompt | They must sign out and in again to show values in protected environments after 15 minutes | Add WebAuthn re-assertion for step-up |
 | No automation API for secret CRUD (UI only); no bulk import | Large migrations need manual entry | Add admin API tokens and `POST/PUT /admin/api/secrets` plus a CSV/JSON importer |
 | Users are local only | No SSO / central deprovisioning | Add OIDC (Entra ID, Okta) as an optional external login, keeping local break-glass admins |
 | Activity log is not tamper-evident | Operational data only (security events are in the audit trail) | Ship to SIEM |

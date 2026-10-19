@@ -56,6 +56,8 @@ public sealed class CertificateHealthCheck(CertificateManager certs) : IHealthCh
 
         if (serverDays <= 0 || anchorDays <= 0)
             return Task.FromResult(HealthCheckResult.Unhealthy("A certificate has expired.", data: data));
+        if (certs.NameConstraintProblem is { } problem)
+            return Task.FromResult(HealthCheckResult.Degraded(problem, data: data));
         if (serverDays < 14)
             return Task.FromResult(HealthCheckResult.Degraded($"Server certificate expires in {serverDays:0} days; renewal is overdue.", data: data));
         if (anchorDays < 180)
@@ -158,10 +160,20 @@ public static class HealthResponse
         }),
     };
 
+    /// <summary>
+    /// Probe endpoints are unauthenticated and on every port, so they only say healthy/degraded/unhealthy (and which
+    /// check, by name, is not healthy). Details (key ID, certificate dates, disk, audit-chain state) are for signed-in
+    /// Admins and Auditors: <c>/admin/api/health</c> and the Health page.
+    /// </summary>
     public static Task WriteAsync(HttpContext ctx, HealthReport report)
     {
         ctx.Response.ContentType = "application/json";
-        return ctx.Response.WriteAsync(JsonSerializer.Serialize(ToDto(report), Json));
+        var summary = new
+        {
+            status = report.Status.ToString(),
+            failing = report.Entries.Where(e => e.Value.Status != HealthStatus.Healthy).Select(e => e.Key).ToList(),
+        };
+        return ctx.Response.WriteAsync(JsonSerializer.Serialize(summary, Json));
     }
 }
 

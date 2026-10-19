@@ -12,6 +12,7 @@
 @inject ILogger<Login> Logger
 @inject IdentityRedirectManager RedirectManager
 @inject AuditService Audit
+@inject CertificateManager Certs
 
 <PageTitle>Sign in · Keyport</PageTitle>
 
@@ -38,6 +39,9 @@
     </PasskeySubmit>
 </EditForm>
 <p class="auth-footnote">Forgot your password? Ask a Keyport administrator to reset it.</p>
+<p class="auth-footnote cell-mono small" title="Compare with the fingerprint your administrator gave you before installing the Keyport CA">
+    CA fingerprint (SHA-256): @Keyport.Core.Pki.CertificateAuthority.Sha256Fingerprint(Certs.TrustAnchor)
+</p>
 
 @code {
     private string? errorMessage;

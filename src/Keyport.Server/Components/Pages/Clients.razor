@@ -5,6 +5,7 @@
 @inherits AppPageBase
 @inject ApiClientService ClientService
 @inject IJSRuntime JS
+@inject CertificateManager Certs
 
 <PageTitle>Applications · Keyport</PageTitle>
 
@@ -318,6 +319,8 @@
             "",
             $"This key only works on port {env.Port} ({env.Name}). Other environments need their own key.",
             $"Trust our certificate authority: http://{host}:{Environments.HttpPort}/ca.crt",
+            $"  Before trusting it, check its SHA-256 fingerprint is {Keyport.Core.Pki.CertificateAuthority.Sha256Fingerprint(Certs.TrustAnchor)}",
+            "  (ask us to confirm it by phone or chat if in doubt; the download itself is not encrypted).",
             "Example:",
             $"  curl --cacert ca.crt -H \"Authorization: Bearer $KEYPORT_API_KEY\" {baseUrl}/{(secrets.FirstOrDefault() is { } f ? (f.Type!.Value.IsConnection() ? "connections" : f.Type.Value.IsCredential() ? "credentials" : "secrets") + "/" + f.Pattern : "secrets")}",
         ]);

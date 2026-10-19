@@ -58,3 +58,17 @@ function smApplyTheme() {
 }
 if (window.Blazor && Blazor.addEventListener) Blazor.addEventListener('enhancedload', smApplyTheme);
 else document.addEventListener('DOMContentLoaded', function () { if (window.Blazor && Blazor.addEventListener) Blazor.addEventListener('enhancedload', smApplyTheme); });
+
+// Session keep-alive: while someone is actually using the page, refresh the sign-in cookie every few minutes so the
+// idle timeout only signs out people who have walked away. No activity → no ping → the session ends on schedule.
+(function () {
+    var active = false;
+    ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'].forEach(function (e) {
+        document.addEventListener(e, function () { active = true; }, { passive: true });
+    });
+    setInterval(function () {
+        if (!active || location.pathname.indexOf('/Account') === 0) return;
+        active = false;
+        fetch('/admin/api/ping', { credentials: 'same-origin', cache: 'no-store' }).catch(function () { });
+    }, 4 * 60 * 1000);
+})();

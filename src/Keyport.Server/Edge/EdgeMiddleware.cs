@@ -24,6 +24,13 @@ public static class HttpContextEdgeExtensions
     public static void SetAuditTarget(this HttpContext ctx, string target) => ctx.Items[TargetKey] = target;
     public static string? AuditTarget(this HttpContext ctx) => ctx.Items[TargetKey] as string;
     public static string? ClientIp(this HttpContext ctx) => ctx.Connection.RemoteIpAddress?.ToString();
+
+    /// <summary>The request's host if the certificate covers it, else the first configured name. Never echoes an arbitrary Host header (open redirect).</summary>
+    public static string SafeHost(this HttpContext ctx, Configuration.EdgeOptions edge)
+    {
+        var host = ctx.Request.Host.Host;
+        return edge.HostNames.Concat(edge.IpAddresses).Contains(host, StringComparer.OrdinalIgnoreCase) ? host : edge.HostNames.FirstOrDefault() ?? "localhost";
+    }
 }
 
 /// <summary>
@@ -35,14 +42,7 @@ public static class HttpContextEdgeExtensions
 /// </summary>
 public sealed class PortGateMiddleware(RequestDelegate next, EnvironmentRegistry environments, Microsoft.Extensions.Options.IOptions<Configuration.KeyportOptions> options)
 {
-    /// <summary>Only redirect to names the certificate covers; never echo an arbitrary Host header (open redirect).</summary>
-    private string RedirectHost(HttpContext ctx)
-    {
-        var edge = options.Value.Edge;
-        var host = ctx.Request.Host.Host;
-        var known = edge.HostNames.Concat(edge.IpAddresses);
-        return known.Contains(host, StringComparer.OrdinalIgnoreCase) ? host : edge.HostNames.FirstOrDefault() ?? "localhost";
-    }
+    private string RedirectHost(HttpContext ctx) => ctx.SafeHost(options.Value.Edge);
 
     public async Task InvokeAsync(HttpContext ctx)
     {
@@ -65,7 +65,9 @@ public sealed class PortGateMiddleware(RequestDelegate next, EnvironmentRegistry
         {
             // Proxied routes must list the ports they may be served on in route metadata: { "Ports": "9443,9444" }.
             var allowed = proxyRoute.Config.Metadata?.GetValueOrDefault("Ports")?.Split(',', StringSplitOptions.TrimEntries) ?? [];
-            if (allowed.Contains(port.ToString())) await next(ctx);
+            // Never on the admin port unless explicitly allowed: the upstream would share the admin UI's origin.
+            var adminBlocked = listener.Kind == ListenerKind.Admin && !options.Value.Proxy.AllowAdminPort;
+            if (allowed.Contains(port.ToString()) && !adminBlocked) await next(ctx);
             else NotFound(ctx);
             return;
         }
@@ -100,6 +102,45 @@ public sealed class PortGateMiddleware(RequestDelegate next, EnvironmentRegistry
     }
 }
 
+/// <summary>
+/// Cross-site request guard for the admin port. Pages on other ports of the same host are "same-site", so browsers
+/// attach the admin cookie to their requests (including WebSockets, which CORS does not cover). State-changing
+/// requests and Blazor hub connections must come from the admin origin itself:
+///   - browsers send <c>Sec-Fetch-Site</c> (can't be set by page script): only <c>same-origin</c> (or <c>none</c>,
+///     a typed/bookmarked request) is accepted;
+///   - otherwise <c>Origin</c>, when present, must be the admin origin (<c>Origin: null</c>, e.g. from a sandboxed
+///     frame, is refused);
+///   - requests with neither (non-browser clients) are not affected; they carry no ambient cookies.
+/// </summary>
+public sealed class AdminOriginGuardMiddleware(RequestDelegate next)
+{
+    public Task InvokeAsync(HttpContext ctx)
+    {
+        if (ctx.Listener().Kind == ListenerKind.Admin
+            && (ctx.Request.Path.StartsWithSegments("/_blazor") || !(HttpMethods.IsGet(ctx.Request.Method) || HttpMethods.IsHead(ctx.Request.Method) || HttpMethods.IsOptions(ctx.Request.Method)))
+            && IsCrossOrigin(ctx.Request))
+        {
+            ctx.Items["sm.error"] = "cross-origin request refused";
+            ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return Task.CompletedTask;
+        }
+        return next(ctx);
+    }
+
+    private static bool IsCrossOrigin(HttpRequest r)
+    {
+        var site = r.Headers["Sec-Fetch-Site"].ToString();
+        if (site.Length > 0) return site is not ("same-origin" or "none");
+        return r.Headers.Origin is { Count: > 0 } origin && !IsSameOrigin(origin.ToString(), r);
+    }
+
+    public static bool IsSameOrigin(string origin, HttpRequest request) =>
+        Uri.TryCreate(origin, UriKind.Absolute, out var o)
+        && o.Scheme == Uri.UriSchemeHttps
+        && string.Equals(o.Host, request.Host.Host, StringComparison.OrdinalIgnoreCase)
+        && o.Port == (request.Host.Port ?? 443);
+}
+
 /// <summary>Hardening headers. CSP is strict: no inline scripts, no third-party origins.</summary>
 public sealed class SecurityHeadersMiddleware(RequestDelegate next)
 {
@@ -122,9 +163,9 @@ public sealed class SecurityHeadersMiddleware(RequestDelegate next)
                 h.StrictTransportSecurity = "max-age=31536000";
 
             var listener = ctx.Listener();
-            // Proxied routes can opt out of the strict CSP (many upstream web apps use inline scripts).
-            var relaxCsp = ctx.GetEndpoint()?.Metadata.GetMetadata<RouteModel>()?.Config.Metadata?.GetValueOrDefault(Services.DbProxyConfigProvider.RelaxCspKey) == "true";
-            if (listener.Kind == ListenerKind.Admin && !relaxCsp)
+            // The admin origin always gets the strict CSP, including any proxied route allowed there.
+            // ("Relax CSP" on a route only matters on environment ports, where Keyport sets no CSP of its own.)
+            if (listener.Kind == ListenerKind.Admin)
                 h.ContentSecurityPolicy = Csp;
             if (listener.Kind == ListenerKind.Environment || ctx.Request.Path.StartsWithSegments("/admin/api"))
             {

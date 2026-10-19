@@ -7,13 +7,14 @@ namespace Keyport.Core.Pki;
 /// <summary>Minimal internal CA: creates a root and issues TLS server certificates signed by it.</summary>
 public static class CertificateAuthority
 {
-    public static X509Certificate2 CreateRoot(string commonName, TimeSpan lifetime)
+    public static X509Certificate2 CreateRoot(string commonName, TimeSpan lifetime, NameConstraints? constraints = null)
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP384);
         var req = new CertificateRequest(new X500DistinguishedName($"CN={commonName}, O=Keyport Internal CA"), key, HashAlgorithmName.SHA384);
         req.CertificateExtensions.Add(new X509BasicConstraintsExtension(certificateAuthority: true, hasPathLengthConstraint: true, pathLengthConstraint: 0, critical: true));
         req.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign | X509KeyUsageFlags.DigitalSignature, critical: true));
         req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, critical: false));
+        if (constraints is not null) req.CertificateExtensions.Add(constraints.ToExtension());
 
         var now = DateTimeOffset.UtcNow;
         using var cert = req.CreateSelfSigned(now.AddDays(-1), now.Add(lifetime));

@@ -11,7 +11,7 @@
 <div class="page-header">
     <div>
         <h1>Health</h1>
-        <p class="page-subtitle">Live health checks. Probes: <code>/health/live</code> (liveness), <code>/health/ready</code> (readiness), <code>/health</code> (full JSON), available on every port.</p>
+        <p class="page-subtitle">Live health checks. Probes: <code>/health/live</code> (liveness), <code>/health/ready</code> (readiness), <code>/health</code> (overall status), available on every port without signing in. Details are only shown here and at <code>/admin/api/health</code>.</p>
     </div>
     <div class="page-actions">
         <button class="btn btn-outline-secondary" disabled="@Busy" @onclick="RunChecksAsync"><i class="i i-refresh"></i> Re-run checks</button>

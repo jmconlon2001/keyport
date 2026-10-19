@@ -24,7 +24,7 @@
                         <div><strong>Add the secret.</strong> Press <em>Add</em>, choose what kind of secret it is (for example <em>SQL Server database</em> or <em>Website or API login</em>), and fill in the details you were given. Fields marked <span class="req">*</span> are required; the bar at the bottom tells you what's still missing.</div>
                     </li>
                     <li>
-                        <div><strong>Test it</strong> (for databases). Press <em>Test</em> to check the server accepts the login before you save.</div>
+                        <div><strong>Test it</strong> (where offered). Press <em>Test</em> before you save. For SQL Server and Oracle it checks the server accepts the login; for other kinds it checks the server can be reached.</div>
                     </li>
                     <li>
                         <div><strong>Give the application access.</strong> After saving, press <em>Give an application access</em>. Choose an existing application or add a new one, and tick the secrets it may read.</div>
@@ -49,7 +49,9 @@
                     <dt>A key was lost or shared by mistake</dt>
                     <dd>On the Applications page press <em>Issue a new key</em> (the circular-arrows button). The old key stops working at once. Send the new key to the owner.</dd>
                     <dt>I need to see a password</dt>
-                    <dd>Open the secret and press <em>Show</em>. It hides again after 30 seconds, and the view is recorded.</dd>
+                    <dd>Open the secret and press <em>Show</em>. It hides again after 30 seconds, and the view is recorded. In protected environments you give a reason, and if you signed in more than 15 minutes ago you're also asked for the code from your authenticator app.</dd>
+                    <dt>I was signed out</dt>
+                    <dd>For safety you're signed out after 30 minutes without activity, and after 8 hours in any case. Just sign in again.</dd>
                 </dl>
             </div>
         </div>
@@ -72,6 +74,8 @@
                     <dd>A program, service or scheduled job that reads secrets. It identifies itself with its <strong>key</strong>.</dd>
                     <dt>Key</dt>
                     <dd>A long code that works like a password for an application. It works in one environment only, and only for the secrets you allowed.</dd>
+                    <dt>Kind of secret</dt>
+                    <dd>What the secret is for, such as a SQL Server database, a PostgreSQL database, a TLS certificate or a website login. It decides which boxes you fill in. See every kind, and what each one stores, on the <a href="secret-types">Secret types</a> page. Your administrator can add new kinds.</dd>
                     <dt>Connection string</dt>
                     <dd>The single line of text an application uses to connect to a database. Keyport builds it for you from the details you enter.</dd>
                 </dl>

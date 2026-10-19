@@ -1,0 +1,21 @@
+// Example custom secret type. Copy to <DataPath>/secret-types/ (default /data/secret-types/) and restart Keyport.
+{
+  "key": "Elasticsearch",
+  "title": "Elasticsearch cluster",
+  "description": "Address and API key for an Elasticsearch cluster.",
+  "category": "database",
+  "icon": "database",
+  "color": "#00bfb3",
+  "fields": [
+    { "key": "url", "label": "Cluster address", "kind": "Url", "required": true,
+      "placeholder": "https://search.corp.local:9200" },
+    { "key": "apiKey", "label": "API key (encoded)", "kind": "Password", "sensitive": true, "required": true,
+      "help": "The 'encoded' value Kibana shows when you create the key." },
+    { "key": "index", "label": "Default index", "placeholder": "e.g. telemetry-*", "advanced": true }
+  ],
+  "outputs": [
+    { "key": "authorizationHeader", "label": "Authorization header", "renderer": "template",
+      "settings": { "template": "ApiKey {{apiKey}}" } }
+  ],
+  "tester": "tcp"
+}

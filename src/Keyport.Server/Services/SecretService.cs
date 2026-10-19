@@ -2,6 +2,7 @@ using System.ComponentModel.DataAnnotations;
 using Microsoft.EntityFrameworkCore;
 using Keyport.Core.Crypto;
 using Keyport.Core.Secrets;
+using Keyport.Core.Secrets.Types;
 using Keyport.Server.Data;
 
 namespace Keyport.Server.Services;
@@ -39,14 +40,15 @@ public sealed class SecretService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     EnvelopeEncryptor encryptor,
     EnvironmentRegistry environments,
-    AuditService audit)
+    AuditService audit,
+    ConnectionTester tester)
 {
     public async Task<List<SecretSummary>> ListAsync(UserAccess user, int environmentId, string? search = null, SecretType? type = null)
     {
         Require(user.CanView(environmentId), "view this environment");
         await using var db = await dbFactory.CreateDbContextAsync();
         var q = db.Secrets.AsNoTracking().Where(s => s.EnvironmentId == environmentId);
-        if (type is { } t) q = q.Where(s => s.Type == t);
+
         if (!string.IsNullOrWhiteSpace(search))
         {
             var term = search.Trim().ToLowerInvariant();
@@ -55,6 +57,7 @@ public sealed class SecretService(
 
         var env = environments.ById(environmentId)!;
         var rows = await q.OrderBy(s => s.Name).ToListAsync();
+        if (type is { } t) rows = rows.Where(s => s.Type == t).ToList(); // filtered in memory: the type is a value-converted struct
         return rows.Select(s =>
         {
             var m = s.Metadata;
@@ -96,6 +99,30 @@ public sealed class SecretService(
         return payload;
     }
 
+    /// <summary>
+    /// Tests a saved secret using only its STORED settings and values, never anything from an edit form, so stored
+    /// passwords can only ever be sent to the server already saved with them. Protected environments need a reason.
+    /// </summary>
+    public async Task<ConnectionTestResult> TestStoredAsync(UserAccess user, int id, string? reason, string? clientIp, CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var s = await db.Secrets.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct) ?? throw new KeyNotFoundException();
+        var env = environments.ById(s.EnvironmentId) ?? throw new KeyNotFoundException();
+        if (!user.CanView(env.Id))
+        {
+            await audit.WriteAsync(user.UserName, "secret.test-connection", AuditResult.Denied, env.Name, s.Name, clientIp, ct: ct);
+            throw new UnauthorizedAccessException("You do not have access to this environment.");
+        }
+        RequireReason(env, reason);
+        if (!ConnectionTester.CanTest(s.Type)) throw new ValidationException("This kind of secret can't be tested.");
+
+        var payload = await DecryptAsync(db, s, s.CurrentVersion);
+        var result = await tester.TestAsync(s.Type, s.Metadata, payload, user.UserName, ct);
+        await audit.WriteAsync(user.UserName, "secret.test-connection", result.Success ? AuditResult.Success : AuditResult.Failure, env.Name, s.Name, clientIp,
+            Details($"v{s.CurrentVersion}; stored settings" + (result.Success ? "" : "; " + result.Message), reason), ct);
+        return result;
+    }
+
     public async Task<int> CreateAsync(UserAccess user, int environmentId, SaveSecretRequest req, string? clientIp)
     {
         var env = environments.ById(environmentId) ?? throw new KeyNotFoundException("Unknown environment.");
@@ -109,6 +136,7 @@ public sealed class SecretService(
         if (await db.Secrets.AnyAsync(s => s.EnvironmentId == env.Id && s.Name == req.Name))
             throw new ValidationException($"A secret named '{req.Name}' already exists in {env.Name}.");
 
+        var (clearValues, sensitiveValues) = Prune(req.Type, req.Metadata, req.Payload);
         await using var tx = await db.Database.BeginTransactionAsync();
         var now = DateTime.UtcNow;
         var secret = new Secret
@@ -116,7 +144,7 @@ public sealed class SecretService(
             EnvironmentId = env.Id,
             Name = req.Name,
             Type = req.Type,
-            MetadataJson = req.Metadata.ToJson(),
+            MetadataJson = clearValues.ToJson(),
             Tags = NormalizeTags(req.Tags),
             RotateAfterUtc = req.RotateAfterUtc,
             CreatedBy = user.UserName,
@@ -127,7 +155,7 @@ public sealed class SecretService(
         db.Secrets.Add(secret);
         await db.SaveChangesAsync(); // assigns Id, which is bound into the ciphertext AAD
 
-        AddVersion(db, secret, req.Payload, user.UserName, req.Comment ?? "created");
+        AddVersion(db, secret, sensitiveValues, user.UserName, req.Comment ?? "created");
         await db.SaveChangesAsync();
         await tx.CommitAsync();
 
@@ -149,14 +177,15 @@ public sealed class SecretService(
         var effectivePayload = req.Payload ?? await DecryptAsync(db, s, s.CurrentVersion);
         Validate(req, effectivePayload);
 
-        s.MetadataJson = req.Metadata.ToJson();
+        var (clearValues, sensitiveValues) = Prune(s.Type, req.Metadata, effectivePayload);
+        s.MetadataJson = clearValues.ToJson();
         s.Tags = NormalizeTags(req.Tags);
         s.RotateAfterUtc = req.RotateAfterUtc;
         s.UpdatedBy = user.UserName;
         s.UpdatedUtc = DateTime.UtcNow;
 
         if (req.Payload is not null)
-            AddVersion(db, s, req.Payload, user.UserName, req.Comment);
+            AddVersion(db, s, sensitiveValues, user.UserName, req.Comment);
 
         await db.SaveChangesAsync();
         await audit.WriteAsync(user.UserName, req.Payload is null ? "secret.update-metadata" : "secret.update", AuditResult.Success,
@@ -215,7 +244,7 @@ public sealed class SecretService(
             Type = s.Type,
             Metadata = s.Metadata.Clone(),
             Tags = s.Tags,
-            Payload = new SecretPayload { Username = payload.Username },
+            Payload = SecretTypeRegistry.ForPromotion(s.Type.Definition, s.Metadata, payload).Sensitive,
             Comment = $"promoted from {source.Name}",
         };
     }
@@ -297,52 +326,31 @@ public sealed class SecretService(
         return SecretPayload.FromJson(encryptor.DecryptString(v.ToBlob(), SecretVersion.Aad(s.Id, s.EnvironmentId, version)));
     }
 
+    /// <summary>
+    /// Validates the name and, through the type's definition, every field (required, formats) and that each output
+    /// renders and parses. Unknown types (definition removed) can't be created or changed.
+    /// </summary>
     private static void Validate(SaveSecretRequest req, SecretPayload p)
     {
         if (!SecretNames.IsValid(req.Name))
             throw new ValidationException("Name must be lowercase path segments of letters, digits, '.', '_' or '-', e.g. billing/oracle-main.");
 
-        var m = req.Metadata;
-        var hasOverride = !string.IsNullOrWhiteSpace(p.ConnectionStringOverride);
-        switch (req.Type)
-        {
-            case SecretType.SqlServerConnection when !hasOverride:
-                if (string.IsNullOrWhiteSpace(m.Host)) throw new ValidationException("Server/host is required.");
-                if (!m.IntegratedSecurity && (string.IsNullOrWhiteSpace(p.Username) || string.IsNullOrEmpty(p.Password)))
-                    throw new ValidationException("Username and password are required unless integrated security is used.");
-                break;
-            case SecretType.OracleConnection when !hasOverride:
-                if (string.IsNullOrWhiteSpace(m.Host)) throw new ValidationException("Host is required.");
-                if (string.IsNullOrWhiteSpace(m.ServiceName) && string.IsNullOrWhiteSpace(m.Sid))
-                    throw new ValidationException("Service name or SID is required.");
-                if (string.IsNullOrWhiteSpace(p.Username) || string.IsNullOrEmpty(p.Password))
-                    throw new ValidationException("Username and password are required.");
-                break;
-            case SecretType.BasicAuth or SecretType.ServiceAccount:
-                if (string.IsNullOrWhiteSpace(p.Username) || string.IsNullOrEmpty(p.Password))
-                    throw new ValidationException("Username and password are required.");
-                break;
-            case SecretType.Generic:
-                if (string.IsNullOrEmpty(p.Value)) throw new ValidationException("Value is required.");
-                break;
-        }
+        var def = req.Type.Definition;
+        if (def.IsUnknown)
+            throw new ValidationException($"Secret type '{req.Type}' is not defined. Add its definition back to change secrets of this type.");
 
-        if (m.Port is < 0 or > 65535) throw new ValidationException("Port must be between 1 and 65535.");
+        var errors = SecretTypeRegistry.Current.Validate(def, SecretFields.Merge(req.Metadata, p));
+        if (errors.Count > 0)
+            throw new ValidationException(string.Join(" ", errors));
+    }
 
-        if (req.Type.IsConnection())
-        {
-            string cs;
-            try
-            {
-                cs = ConnectionStringFactory.Build(req.Type, m, p);
-            }
-            catch (Exception ex) when (ex is ArgumentException or FormatException or KeyNotFoundException)
-            {
-                throw new ValidationException($"Invalid connection settings: {ex.Message}");
-            }
-            if (!ConnectionStringFactory.TryParse(req.Type, cs, out var error))
-                throw new ValidationException($"Connection string is not valid for the driver: {error}");
-        }
+    /// <summary>Keeps only the fields the type defines (plus the description), so values left over from switching types aren't stored.</summary>
+    private static (SecretMetadata Clear, SecretPayload Sensitive) Prune(SecretType type, SecretMetadata clear, SecretPayload sensitive)
+    {
+        var def = type.Definition;
+        if (def.IsUnknown) return (clear, sensitive);
+        var merged = SecretFields.Merge(clear, sensitive);
+        return SecretTypeRegistry.Split(def, merged, clear.Description);
     }
 
     private static void RequireReason(EnvironmentInfo env, string? reason)

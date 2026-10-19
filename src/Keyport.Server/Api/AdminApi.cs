@@ -15,6 +15,8 @@ public static class AdminApi
     {
         var admin = app.MapGroup("/admin/api").WithTags("Admin API").RequireAuthorization();
 
+        // Keeps the sign-in cookie alive while someone is actively using an open tab (called by app.js).
+        admin.MapGet("/ping", () => Results.NoContent()).ExcludeFromDescription();
         admin.MapGet("/status", (StatusService status, CancellationToken ct) => status.GetAsync(ct))
             .WithSummary("Operational status: listeners, traffic, certificates, jobs.");
 

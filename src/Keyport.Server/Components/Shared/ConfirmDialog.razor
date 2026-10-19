@@ -14,10 +14,18 @@
             <label class="form-label" for="confirm-reason">Reason @(ReasonRequired ? "" : "(optional)")</label>
             <input id="confirm-reason" class="form-control" @bind="reason" @bind:event="oninput" placeholder="e.g. CHG-1234 rotate after DBA password reset" maxlength="300" />
         }
+        @if (AskCode)
+        {
+            <label class="form-label mt-3" for="confirm-code">Authenticator code</label>
+            <input id="confirm-code" class="form-control otp-input" value="@Code" @oninput="e => CodeChanged.InvokeAsync(e.Value as string)"
+                   autocomplete="one-time-code" inputmode="numeric" maxlength="7" placeholder="000000" />
+            <div class="form-text">You signed in a while ago. Enter the code from your authenticator app to confirm it's you.</div>
+            @if (CodeError is not null){<div class="text-danger small mt-1">@CodeError</div>}
+        }
     </ChildContent>
     <Footer>
         <button type="button" class="btn btn-outline-secondary" @onclick="Cancel">Cancel</button>
-        <button type="button" class="btn @(Danger ? "btn-danger" : "btn-primary")" disabled="@(ReasonRequired && string.IsNullOrWhiteSpace(reason))" @onclick="Confirm">@ConfirmText</button>
+        <button type="button" class="btn @(Danger ? "btn-danger" : "btn-primary")" disabled="@((ReasonRequired && string.IsNullOrWhiteSpace(reason)) || (AskCode && (Code?.Trim().Length ?? 0) < 6))" @onclick="Confirm">@ConfirmText</button>
     </Footer>
 </Modal>
 
@@ -36,6 +44,12 @@
     private bool ReasonRequired => RequireReason || Env is { Protected: true };
     [Parameter] public EventCallback<string?> OnConfirm { get; set; }
     [Parameter] public EventCallback OnCancel { get; set; }
+
+    /// <summary>Also ask for an authenticator code (step-up re-authentication).</summary>
+    [Parameter] public bool AskCode { get; set; }
+    [Parameter] public string? Code { get; set; }
+    [Parameter] public EventCallback<string?> CodeChanged { get; set; }
+    [Parameter] public string? CodeError { get; set; }
 
     private string? reason;
 

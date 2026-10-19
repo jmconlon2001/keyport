@@ -16,9 +16,19 @@ public sealed record UserAccess(string UserId, string UserName, bool IsAdmin, bo
 }
 
 /// <summary>Resolves <see cref="UserAccess"/> for the current Blazor circuit (cached per circuit/request scope).</summary>
-public sealed class AccessService(AuthenticationStateProvider authState, IDbContextFactory<ApplicationDbContext> dbFactory)
+public sealed class AccessService
 {
+    private readonly AuthenticationStateProvider authState;
+    private readonly IDbContextFactory<ApplicationDbContext> dbFactory;
     private UserAccess? _cached;
+
+    public AccessService(AuthenticationStateProvider authState, IDbContextFactory<ApplicationDbContext> dbFactory)
+    {
+        this.authState = authState;
+        this.dbFactory = dbFactory;
+        // Signed out, timed out or roles changed (the revalidator checks every minute): look the user up again.
+        authState.AuthenticationStateChanged += _ => _cached = null;
+    }
 
     public async Task<UserAccess> GetAsync()
     {
@@ -33,6 +43,14 @@ public sealed class AccessService(AuthenticationStateProvider authState, IDbCont
         if (user.Identity?.IsAuthenticated != true || id is null) return UserAccess.Anonymous;
 
         await using var db = await dbFactory.CreateDbContextAsync();
+
+        // Same rule as AccountEnforcementMiddleware: no access until the password is changed and MFA is enrolled.
+        var account = await db.Users.AsNoTracking().Where(u => u.Id == id)
+            .Select(u => new { u.MustChangePassword, u.TwoFactorEnabled }).FirstOrDefaultAsync();
+        if (account is null || account.MustChangePassword) return UserAccess.Anonymous;
+        if (!account.TwoFactorEnabled && !await db.Set<Microsoft.AspNetCore.Identity.IdentityUserPasskey<string>>().AnyAsync(p => p.UserId == id))
+            return UserAccess.Anonymous;
+
         var roles = await db.UserEnvironmentRoles.AsNoTracking().Where(r => r.UserId == id).ToDictionaryAsync(r => r.EnvironmentId, r => r.Role);
         return new UserAccess(id, user.Identity.Name ?? id, user.IsInRole(Roles.Admin), user.IsInRole(Roles.Auditor), roles);
     }

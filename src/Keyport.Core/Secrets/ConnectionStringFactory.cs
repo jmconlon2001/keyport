@@ -1,75 +1,34 @@
 using System.Data.Common;
+using Keyport.Core.Secrets.Types;
 using Microsoft.Data.SqlClient;
 using Oracle.ManagedDataAccess.Client;
 
 namespace Keyport.Core.Secrets;
 
+/// <summary>
+/// Convenience API for connection strings. Rendering is driven by the secret type's definition and renderers
+/// (see <see cref="SecretTypeRegistry"/>); this class keeps the original call shape for existing callers.
+/// </summary>
 public static class ConnectionStringFactory
 {
-    public const string Mask = "********";
+    public const string Mask = SecretTypeRegistry.Mask;
 
     /// <summary>Builds a driver-ready connection string. Values are escaped by the driver's own builder.</summary>
     public static string Build(SecretType type, SecretMetadata meta, SecretPayload payload)
     {
-        if (!string.IsNullOrWhiteSpace(payload.ConnectionStringOverride))
-            return payload.ConnectionStringOverride;
-
-        return type switch
-        {
-            SecretType.SqlServerConnection => BuildSqlServer(meta, payload),
-            SecretType.OracleConnection => BuildOracle(meta, payload),
-            _ => throw new ArgumentException($"{type} is not a connection type.", nameof(type)),
-        };
+        var def = type.Definition;
+        var output = def.Outputs.FirstOrDefault(o => o.Key == OutputKeys.ConnectionString)
+            ?? throw new ArgumentException($"{type} is not a connection type.", nameof(type));
+        return SecretTypeRegistry.Current.Render(def, output, SecretFields.Merge(meta, payload));
     }
 
     /// <summary>Same as <see cref="Build"/> but with the password replaced by a mask, for UI previews.</summary>
-    public static string BuildMasked(SecretType type, SecretMetadata meta, SecretPayload payload)
-    {
-        if (!string.IsNullOrWhiteSpace(payload.ConnectionStringOverride))
-            return MaskPassword(payload.ConnectionStringOverride);
+    public static string BuildMasked(SecretType type, SecretMetadata meta, SecretPayload payload) =>
+        SecretTypeRegistry.Current.RenderMasked(type.Definition, SecretFields.Merge(meta, payload)).GetValueOrDefault(OutputKeys.ConnectionString)
+            ?? throw new ArgumentException($"{type} is not a connection type.", nameof(type));
 
-        var masked = new SecretPayload
-        {
-            Username = payload.Username,
-            Password = string.IsNullOrEmpty(payload.Password) ? null : Mask,
-        };
-        return Build(type, meta, masked);
-    }
-
-    public static string BuildSqlServer(SecretMetadata meta, SecretPayload payload)
-    {
-        var b = new SqlConnectionStringBuilder
-        {
-            DataSource = meta.Port is > 0 ? $"{meta.Host},{meta.Port}" : meta.Host ?? "",
-        };
-        if (!string.IsNullOrWhiteSpace(meta.Database)) b.InitialCatalog = meta.Database;
-
-        if (meta.IntegratedSecurity)
-        {
-            b.IntegratedSecurity = true;
-        }
-        else
-        {
-            if (!string.IsNullOrEmpty(payload.Username)) b.UserID = payload.Username;
-            if (!string.IsNullOrEmpty(payload.Password)) b.Password = payload.Password;
-        }
-
-        if (!string.IsNullOrWhiteSpace(meta.Encrypt)) b.Encrypt = SqlConnectionEncryptOption.Parse(meta.Encrypt);
-        if (meta.TrustServerCertificate) b.TrustServerCertificate = true;
-        if (!string.IsNullOrWhiteSpace(meta.ApplicationName)) b.ApplicationName = meta.ApplicationName;
-
-        ApplyExtras(b, meta.ExtraOptions);
-        return b.ConnectionString;
-    }
-
-    public static string BuildOracle(SecretMetadata meta, SecretPayload payload)
-    {
-        var b = new OracleConnectionStringBuilder { DataSource = OracleDataSource(meta) };
-        if (!string.IsNullOrEmpty(payload.Username)) b.UserID = payload.Username;
-        if (!string.IsNullOrEmpty(payload.Password)) b.Password = payload.Password;
-        ApplyExtras(b, meta.ExtraOptions);
-        return b.ConnectionString;
-    }
+    public static string BuildSqlServer(SecretMetadata meta, SecretPayload payload) => Build(SecretType.SqlServerConnection, meta, payload);
+    public static string BuildOracle(SecretMetadata meta, SecretPayload payload) => Build(SecretType.OracleConnection, meta, payload);
 
     public static string OracleDataSource(SecretMetadata meta)
     {
@@ -96,7 +55,9 @@ public static class ConnectionStringFactory
         {
             DbConnectionStringBuilder b = type == SecretType.OracleConnection
                 ? new OracleConnectionStringBuilder(connectionString)
-                : new SqlConnectionStringBuilder(connectionString);
+                : type == SecretType.SqlServerConnection
+                    ? new SqlConnectionStringBuilder(connectionString)
+                    : new DbConnectionStringBuilder { ConnectionString = connectionString };
             error = null;
             return b.Count > 0;
         }
@@ -107,15 +68,7 @@ public static class ConnectionStringFactory
         }
     }
 
-    private static void ApplyExtras(DbConnectionStringBuilder b, string? extras)
-    {
-        if (string.IsNullOrWhiteSpace(extras)) return;
-        var parsed = new DbConnectionStringBuilder { ConnectionString = extras };
-        foreach (string key in parsed.Keys)
-            b[key] = parsed[key];
-    }
-
-    private static string MaskPassword(string cs)
+    public static string MaskPassword(string cs)
     {
         try
         {

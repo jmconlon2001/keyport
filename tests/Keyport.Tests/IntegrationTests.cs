@@ -91,13 +91,25 @@ public sealed class ServerFixture : IAsyncLifetime
         await File.WriteAllTextAsync(KeyFile, MasterKey.GenerateBase64());
         Directory.CreateDirectory(Path.Combine(DataDir, "secret-types"));
         await File.WriteAllTextAsync(Path.Combine(DataDir, "secret-types", "search.json"), CustomTypeJson);
-        HttpPort = FreePort();
-        AdminPort = FreePort();
-        foreach (var n in EnvNames) EnvPorts[n] = FreePort();
+        // Free ports are picked, released, then bound, so a parallel test can take one in between: retry with new ports.
+        for (var attempt = 1; ; attempt++)
+        {
+            HttpPort = FreePort();
+            AdminPort = FreePort();
+            foreach (var n in EnvNames) EnvPorts[n] = FreePort();
 
-        App = KeyportApp.Build(Args());
-        await KeyportApp.InitializeAsync(App);
-        await App.StartAsync();
+            App = KeyportApp.Build(Args());
+            await KeyportApp.InitializeAsync(App);
+            try
+            {
+                await App.StartAsync();
+                break;
+            }
+            catch (IOException ex) when (attempt < 5 && ex.Message.Contains("address already in use", StringComparison.OrdinalIgnoreCase))
+            {
+                await App.DisposeAsync();
+            }
+        }
         Ca = App.Services.GetRequiredService<CertificateManager>().TrustAnchor;
     }
 

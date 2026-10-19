@@ -1,0 +1,31 @@
+@* Shows a connection test in progress or its result, right next to the button that started it. *@
+@if (Testing || Result is not null)
+{
+    <div id="@Id" tabindex="-1" class="test-result alert @(Testing ? "alert-info" : Result!.Success ? "alert-success" : "alert-danger") d-flex gap-2 align-items-start mb-0" role="status" aria-live="polite">
+        @if (Testing)
+        {
+            <span class="spinner-border spinner-border-sm mt-1" aria-hidden="true"></span>
+            <div><strong>Testing the connection…</strong> This can take up to 10 seconds.</div>
+        }
+        else
+        {
+            <i class="i @(Result!.Success ? "i-check" : "i-alert") mt-1"></i>
+            <div class="flex-grow-1">
+                <strong>@(Result.Success ? "Connection works." : "Couldn't connect.")</strong> @Result.Message
+                <span class="text-muted small">(@Result.ElapsedMs.ToString("0") ms)</span>
+                @if (Source is not null){<div class="small text-muted mt-1">@Source</div>}
+            </div>
+            <button type="button" class="btn-close" aria-label="Dismiss" @onclick="OnDismiss"></button>
+        }
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public string Id { get; set; } = "test-result";
+    [Parameter] public bool Testing { get; set; }
+    [Parameter] public Keyport.Server.Services.ConnectionTestResult? Result { get; set; }
+
+    /// <summary>What was tested, e.g. "Tested with the saved details" (optional).</summary>
+    [Parameter] public string? Source { get; set; }
+    [Parameter] public EventCallback OnDismiss { get; set; }
+}

@@ -43,6 +43,7 @@ public sealed partial class ConnectionTester(IOptions<KeyportOptions> options, T
         if (!TryTakeSlot(actor, cfg.PerUserPerMinute))
             return new ConnectionTestResult(false, "Too many tests in the last minute. Wait a moment and try again.", 0);
 
+        string? target = null;
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -52,6 +53,7 @@ public sealed partial class ConnectionTester(IOptions<KeyportOptions> options, T
             var (host, port, cs) = Target(def, type, meta, payload, values);
             if (string.IsNullOrWhiteSpace(host) || port is null)
                 return new ConnectionTestResult(false, "Fill in the server name (and port) to test.", 0);
+            target = $"{host}:{port}";
 
             var addresses = await ResolveAllowedAsync(host, port.Value, timeout.Token);
             if (addresses.Error is not null) return new ConnectionTestResult(false, addresses.Error, sw.Elapsed.TotalMilliseconds);
@@ -64,7 +66,7 @@ public sealed partial class ConnectionTester(IOptions<KeyportOptions> options, T
         }
         catch (Exception ex)
         {
-            return new ConnectionTestResult(false, Describe(ex), sw.Elapsed.TotalMilliseconds);
+            return new ConnectionTestResult(false, Describe(ex, target ?? "the server"), sw.Elapsed.TotalMilliseconds);
         }
     }
 
@@ -139,9 +141,9 @@ public sealed partial class ConnectionTester(IOptions<KeyportOptions> options, T
         else
         {
             try { addresses = [.. await Dns.GetHostAddressesAsync(host, ct)]; }
-            catch (SocketException) { return new([], $"The server name '{host}' could not be found."); }
+            catch (SocketException) { return new([], $"The server name '{host}' could not be found from this Keyport server (check the name, and that its DNS/VPN can resolve it)."); }
         }
-        if (addresses.Count == 0) return new([], $"The server name '{host}' could not be found.");
+        if (addresses.Count == 0) return new([], $"The server name '{host}' could not be found from this Keyport server (check the name, and that its DNS/VPN can resolve it).");
 
         var ownPorts = KeyportPorts();
         foreach (var raw in addresses)
@@ -223,23 +225,60 @@ public sealed partial class ConnectionTester(IOptions<KeyportOptions> options, T
         return new ConnectionTestResult(true, $"The server {host}:{port} is reachable. (This checks the network only, not the login.)", sw.Elapsed.TotalMilliseconds);
     }
 
-    /// <summary>A category, never raw driver text (which can echo connection details or be used to fingerprint internal services).</summary>
-    private static string Describe(Exception ex) => ex switch
+    /// <summary>
+    /// A plain explanation, never raw driver text (which can echo connection details or fingerprint internal services).
+    /// Drivers wrap the real cause (e.g. ORA-50201 "failed to connect" around ORA-50232 "TCP connect failure"), so the
+    /// whole exception chain is inspected.
+    /// </summary>
+    private static string Describe(Exception ex, string target)
     {
-        OperationCanceledException or TimeoutException => "Timed out after 10 seconds.",
-        SocketException { SocketErrorCode: SocketError.ConnectionRefused } => "The server refused the connection (nothing is listening on that port).",
-        SocketException { SocketErrorCode: SocketError.HostNotFound or SocketError.NoData } => "The server name could not be found.",
-        SocketException { SocketErrorCode: SocketError.TimedOut } => "Timed out after 10 seconds.",
-        SocketException or IOException => "The server could not be reached.",
-        SqlException { Number: 18456 or 18452 or 18470 or 18486 or 18487 or 18488 } => "The server was reached, but the login failed.",
-        SqlException { Number: 4060 } => "The server was reached and the login worked, but the database could not be opened.",
-        OracleException { Number: 1017 or 28000 or 28001 } => "The server was reached, but the login failed.",
-        OracleException { Number: 12514 or 12505 } => "The server was reached, but it doesn't know that service name / SID.",
-        AuthenticationException => "TLS/encryption problem: the server's certificate was not accepted.",
-        SqlException s when s.Message.Contains("certificate", StringComparison.OrdinalIgnoreCase) => "TLS/encryption problem: the server's certificate was not accepted.",
-        SqlException s => $"Could not connect (SQL Server error {s.Number}).",
-        OracleException o => $"Could not connect (ORA-{o.Number:00000}).",
-        ArgumentException => "The connection settings are not valid.",
-        _ => "Could not connect.",
-    };
+        var unreachable = $"Nothing accepted the connection at {target} (refused or blocked). Check the server name and port, " +
+            "that the database listener is running, and that this Keyport server can reach it (firewall rules, or a VPN that doesn't carry traffic from containers).";
+        var timedOut = $"No answer from {target} within 10 seconds. The address may be firewalled or not routable from this Keyport server (check VPN / network access).";
+        var notFound = $"The server name in {target} could not be found from this Keyport server (check the name, and that its DNS/VPN can resolve it).";
+
+        var chain = new List<Exception>();
+        for (var e = ex; e is not null; e = e.InnerException) chain.Add(e);
+
+        if (chain.OfType<SocketException>().FirstOrDefault() is { } socket)
+            return socket.SocketErrorCode switch
+            {
+                SocketError.ConnectionRefused or SocketError.ConnectionReset or SocketError.HostUnreachable or SocketError.NetworkUnreachable => unreachable,
+                SocketError.HostNotFound or SocketError.NoData or SocketError.TryAgain => notFound,
+                SocketError.TimedOut => timedOut,
+                _ => unreachable,
+            };
+
+        // Oracle: the deepest ORA- code in the chain is the most specific one.
+        var ora = chain.Select(e => OraCodeRegex().Match(e.Message)).Where(m => m.Success).Select(m => int.Parse(m.Groups[1].Value)).LastOrDefault();
+        if (ora != 0 || chain.Any(e => e is OracleException))
+            return ora switch
+            {
+                1017 or 28000 or 28001 => "The server was reached, but the login failed (wrong user name or password, or the account is locked/expired).",
+                12514 or 12505 => $"{target} answered, but it doesn't know that service name / SID.",
+                12541 or 12543 or 50232 or 50201 or 12537 => unreachable,
+                12170 or 50000 => timedOut,
+                12154 or 12545 or 12262 => notFound,
+                _ => $"Could not connect to {target} (ORA-{ora:00000}).",
+            };
+
+        return ex switch
+        {
+            OperationCanceledException or TimeoutException => timedOut,
+            SqlException { Number: 18456 or 18452 or 18470 or 18486 or 18487 or 18488 } => "The server was reached, but the login failed.",
+            SqlException { Number: 4060 } => "The server was reached and the login worked, but the database could not be opened.",
+            SqlException { Number: -2 or 258 } => timedOut,
+            SqlException { Number: 11001 } => notFound,
+            SqlException { Number: 2 or 53 or 40 or 10061 or 10060 or 35 } => unreachable,
+            AuthenticationException => "TLS/encryption problem: the server's certificate was not accepted.",
+            SqlException s when s.Message.Contains("certificate", StringComparison.OrdinalIgnoreCase) => "TLS/encryption problem: the server's certificate was not accepted.",
+            SqlException s => $"Could not connect to {target} (SQL Server error {s.Number}).",
+            IOException => unreachable,
+            ArgumentException => "The connection settings are not valid.",
+            _ => $"Could not connect to {target}.",
+        };
+    }
+
+    [GeneratedRegex(@"ORA-(\d{4,5})")]
+    private static partial Regex OraCodeRegex();
 }

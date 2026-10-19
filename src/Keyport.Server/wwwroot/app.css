@@ -710,3 +710,7 @@ h1:focus, h1:focus-visible { outline: none; }
 .field-table td { white-space: normal; }
 .field-table td:first-child { min-width: 11rem; }
 .field-table td:last-child { min-width: 9rem; overflow-wrap: anywhere; }
+
+/* Connection test result, shown next to the button that ran it. */
+.test-result { scroll-margin: 6rem; }
+.test-result:focus { outline: none; box-shadow: 0 0 0 .2rem color-mix(in srgb, currentColor 25%, transparent); }

@@ -478,3 +478,26 @@ public class KekRotationTests
         }
     }
 }
+
+// ---------- Connection test messages explain the real cause ----------
+
+public class ConnectionTesterMessageTests
+{
+    [Fact]
+    public async Task OracleConnectFailureExplainsUnreachableServer()
+    {
+        // A local port with nothing listening reproduces ORA-50201 wrapping ORA-50232 (TCP connect failure).
+        int port;
+        using (var l = new TcpListener(IPAddress.Loopback, 0)) { l.Start(); port = ((IPEndPoint)l.LocalEndpoint).Port; }
+        var o = new KeyportOptions();
+        o.ConnectionTest.AllowedTargets.Add("127.0.0.1/32");
+        var tester = new ConnectionTester(Options.Create(o), TimeProvider.System);
+
+        var r = await tester.TestAsync(SecretType.OracleConnection,
+            SecretMetadata.From([new("host", "127.0.0.1"), new("port", port.ToString()), new("serviceName", "ORCLPDB")]),
+            new SecretPayload { Username = "u", Password = "p" }, "alice");
+        Assert.False(r.Success);
+        Assert.Contains($"Nothing accepted the connection at 127.0.0.1:{port}", r.Message);
+        Assert.DoesNotContain("ORA-", r.Message);
+    }
+}
